@@ -13,6 +13,7 @@ dependencies = [
     "yfinance>=0.2.30",
     "gymnasium>=0.29",
     "plotly>=5.15",
+    "lxml>=4.9",
 ]
 
 [project.optional-dependencies]
