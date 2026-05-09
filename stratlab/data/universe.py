@@ -8,6 +8,7 @@ import pandas as pd
 import requests
 import yfinance as yf
 
+from stratlab.data._etf_lists import INVERSE_ETFS, LEVERAGED_ETFS, POPULAR_ETFS
 from stratlab.data.provider import (
     CACHE_DIR,
     _cache_path,
@@ -18,9 +19,61 @@ from stratlab.data.provider import (
     _write_cache,
 )
 
-SP500_WIKI_URL = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
-TICKERS_CACHE = CACHE_DIR / "sp500_tickers.json"
 _USER_AGENT = "stratlab/0.1 (https://github.com/lunarnaut1414/stratlab) python-requests"
+
+SP500_WIKI_URL = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+NASDAQ100_WIKI_URL = "https://en.wikipedia.org/wiki/Nasdaq-100"
+DOW30_WIKI_URL = "https://en.wikipedia.org/wiki/Dow_Jones_Industrial_Average"
+
+
+def _scrape_index_tickers(
+    url: str,
+    cache_name: str,
+    symbol_columns: tuple[str, ...] = ("Symbol", "Ticker", "Ticker symbol"),
+    use_cache: bool = True,
+    max_age_days: int = 7,
+) -> list[str]:
+    """Scrape constituent tickers from a Wikipedia index page.
+
+    Picks the first table that has any of ``symbol_columns`` as a column name —
+    safer than indexing by table position, since Wikipedia editors rearrange
+    tables. Tickers are Yahoo-formatted (``.`` → ``-``).
+    """
+    cache_path = CACHE_DIR / cache_name
+    if use_cache and cache_path.exists():
+        payload = json.loads(cache_path.read_text())
+        fetched_at = datetime.fromisoformat(payload["fetched_at"])
+        if datetime.now() - fetched_at < timedelta(days=max_age_days):
+            return payload["tickers"]
+
+    resp = requests.get(url, headers={"User-Agent": _USER_AGENT}, timeout=30)
+    resp.raise_for_status()
+    tables = pd.read_html(io.StringIO(resp.text))
+
+    chosen = None
+    chosen_col = None
+    for table in tables:
+        for col in symbol_columns:
+            if col in table.columns:
+                chosen = table
+                chosen_col = col
+                break
+        if chosen is not None:
+            break
+
+    if chosen is None:
+        raise ValueError(
+            f"No constituents table found at {url} (looked for columns {symbol_columns})"
+        )
+
+    tickers = [str(t).replace(".", "-").strip() for t in chosen[chosen_col].tolist()]
+    tickers = [t for t in tickers if t and t.lower() != "nan"]
+
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    cache_path.write_text(
+        json.dumps({"fetched_at": datetime.now().isoformat(), "tickers": tickers})
+    )
+    return tickers
 
 
 def sp500_tickers(use_cache: bool = True, max_age_days: int = 7) -> list[str]:
@@ -33,23 +86,79 @@ def sp500_tickers(use_cache: bool = True, max_age_days: int = 7) -> list[str]:
     backtests introduces survivorship bias — the list excludes companies that
     were removed (Lehman, Sears, etc.) and includes companies added recently.
     """
-    if use_cache and TICKERS_CACHE.exists():
-        payload = json.loads(TICKERS_CACHE.read_text())
-        fetched_at = datetime.fromisoformat(payload["fetched_at"])
-        if datetime.now() - fetched_at < timedelta(days=max_age_days):
-            return payload["tickers"]
-
-    resp = requests.get(SP500_WIKI_URL, headers={"User-Agent": _USER_AGENT}, timeout=30)
-    resp.raise_for_status()
-    tables = pd.read_html(io.StringIO(resp.text))
-    constituents = tables[0]
-    tickers = [str(t).replace(".", "-").strip() for t in constituents["Symbol"].tolist()]
-
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    TICKERS_CACHE.write_text(
-        json.dumps({"fetched_at": datetime.now().isoformat(), "tickers": tickers})
+    return _scrape_index_tickers(
+        SP500_WIKI_URL, "sp500_tickers.json",
+        use_cache=use_cache, max_age_days=max_age_days,
     )
-    return tickers
+
+
+def nasdaq100_tickers(use_cache: bool = True, max_age_days: int = 7) -> list[str]:
+    """Current Nasdaq-100 constituents, scraped from Wikipedia."""
+    return _scrape_index_tickers(
+        NASDAQ100_WIKI_URL, "nasdaq100_tickers.json",
+        use_cache=use_cache, max_age_days=max_age_days,
+    )
+
+
+def dow30_tickers(use_cache: bool = True, max_age_days: int = 7) -> list[str]:
+    """Current Dow Jones Industrial Average constituents, scraped from Wikipedia."""
+    return _scrape_index_tickers(
+        DOW30_WIKI_URL, "dow30_tickers.json",
+        use_cache=use_cache, max_age_days=max_age_days,
+    )
+
+
+def popular_etfs() -> list[str]:
+    """~150 broadly-traded ETFs covering equity, bonds, commodities, REITs,
+    currency, factor, thematic, crypto, and volatility. Long-side, unlevered."""
+    return list(POPULAR_ETFS)
+
+
+def inverse_etfs() -> list[str]:
+    """~30 inverse / short ETFs (1x, 2x, 3x). Going long these provides short
+    exposure to the underlying without margin or borrow."""
+    return list(INVERSE_ETFS)
+
+
+def leveraged_etfs() -> list[str]:
+    """~25 leveraged long ETFs (2x, 3x). Daily-rebalanced — multi-day holds
+    drift from a simple multiple due to volatility decay."""
+    return list(LEVERAGED_ETFS)
+
+
+def default_universe(
+    include_sp500: bool = True,
+    include_nasdaq100: bool = True,
+    include_dow30: bool = True,
+    include_etfs: bool = True,
+    include_inverse: bool = True,
+    include_leveraged: bool = True,
+) -> list[str]:
+    """Combined deduped universe of indexes + curated ETF lists.
+
+    Defaults to *everything* — roughly 700 tickers. Toggle the flags to scope
+    down. Order is preserved so the result is reproducible across runs.
+    """
+    seen: dict[str, None] = {}
+    parts: list[list[str]] = []
+    if include_sp500:
+        parts.append(sp500_tickers())
+    if include_nasdaq100:
+        parts.append(nasdaq100_tickers())
+    if include_dow30:
+        parts.append(dow30_tickers())
+    if include_etfs:
+        parts.append(popular_etfs())
+    if include_inverse:
+        parts.append(inverse_etfs())
+    if include_leveraged:
+        parts.append(leveraged_etfs())
+
+    for chunk in parts:
+        for t in chunk:
+            if t and t not in seen:
+                seen[t] = None
+    return list(seen.keys())
 
 
 def load_universe(
