@@ -142,8 +142,16 @@ Every backtest returns:
 The simulated broker models:
 - **Slippage** — configurable percentage (default 0.05%)
 - **Commission** — configurable percentage (default 0.1%)
-- **Position tracking** — average entry price, size
-- **Cash management** — rejects orders that exceed available cash
+- **Long & short** — `pos.size` is signed. SELL beyond your long flips to short
+  in one fill. Disable with `Backtest(allow_short=False)`.
+- **Borrow cost** — annualized rate accrued daily on absolute short notional;
+  set with `Backtest(borrow_rate_annual=0.005)` (50 bps/yr is a stylized
+  general-collateral default; hard-to-borrow names are higher).
+- **Position tracking** — size-weighted average entry, resets when a position
+  crosses zero.
+
+> **Margin is not enforced.** The broker doesn't check Reg-T or maintenance
+> margin — strategies are responsible for sizing within reasonable leverage.
 
 ## Execution timing
 

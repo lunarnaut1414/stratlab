@@ -43,6 +43,8 @@ class Backtest:
     initial_cash: float = 100_000.0
     commission_pct: float = 0.001
     slippage_pct: float = 0.0005
+    allow_short: bool = True
+    borrow_rate_annual: float = 0.0
 
     broker: Broker = field(init=False)
 
@@ -51,6 +53,8 @@ class Backtest:
             initial_cash=self.initial_cash,
             commission_pct=self.commission_pct,
             slippage_pct=self.slippage_pct,
+            allow_short=self.allow_short,
+            borrow_rate_annual=self.borrow_rate_annual,
         )
 
     def run(self) -> BacktestResult:
@@ -71,6 +75,8 @@ class Backtest:
         last_close: dict[str, float] = {sym: 0.0 for sym in aligned}
         pending: list = []
         dropped_orders = 0
+        total_borrow_cost = 0.0
+        prev_ts: pd.Timestamp | None = None
 
         self.strategy.on_start()
 
@@ -93,6 +99,13 @@ class Backtest:
 
             for sym in tradeable:
                 last_close[sym] = float(bar_closes[sym])
+
+            # Accrue borrow cost on short positions for the calendar gap since
+            # the previous bar (so weekends/holidays accrue correctly).
+            if prev_ts is not None and self.broker.borrow_rate_annual != 0.0:
+                days = (common_index[i] - prev_ts).days
+                total_borrow_cost += self.broker.accrue_borrow(last_close, days=days)
+            prev_ts = common_index[i]
 
             ctx = BarContext(
                 idx=i,
@@ -128,6 +141,7 @@ class Backtest:
         metrics = compute_metrics(equity_series, returns)
         metrics["n_trades"] = len(self.broker.fills)
         metrics["dropped_orders"] = dropped_orders
+        metrics["borrow_cost"] = total_borrow_cost
 
         return BacktestResult(
             equity_curve=equity_series,
