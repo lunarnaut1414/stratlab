@@ -10,8 +10,9 @@ The minimum you need to know to run, query, and backtest.
 python -m stratlab.refresh_all
 ```
 
-Pulls market data (~850 tickers) and last-7-days of NPR articles. Idempotent:
-re-running the same day fetches nothing new and finishes in seconds.
+Pulls market data (~850 tickers) and recent articles from NPR, BBC, and
+AP. Idempotent: re-running the same day fetches nothing new and finishes
+in seconds.
 
 The first run is slow (~5-10 min) because it cold-fetches max history per
 ticker. Every run after that just appends yesterday's bar.
@@ -30,12 +31,19 @@ ticker. Every run after that just appends yesterday's bar.
 
 ## Or split it
 
-Sometimes you want one without the other:
+Sometimes you want one without the others:
 
 ```bash
 python -m stratlab.refresh                    # market only
-python -m stratlab.news.npr                   # news only
+python -m stratlab.news.npr                   # NPR only (date-archive walker)
+python -m stratlab.news.bbc                   # BBC only (RSS-driven)
+python -m stratlab.news.ap                    # AP only (topic-hub walker)
 ```
+
+Each news source has its own topic vocabulary and own `--topics` choices.
+NPR has a date archive so it supports historical backfill (`--full` or
+`--start ...`). BBC and AP only expose recent articles, so they run in
+"latest" mode and accumulate coverage when run on a daily cadence.
 
 ---
 
