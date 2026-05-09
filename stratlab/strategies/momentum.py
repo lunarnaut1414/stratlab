@@ -3,17 +3,21 @@ from __future__ import annotations
 import pandas as pd
 
 from stratlab.engine.broker import Order, OrderSide
+from stratlab.engine.context import BarContext
 from stratlab.strategies.base import Strategy
 
 
 class Momentum(Strategy):
-    """RSI-based momentum strategy.
+    """RSI-based momentum strategy (single-asset).
 
     Buys when RSI drops below oversold threshold, sells when it rises above overbought.
     """
 
     def __init__(
-        self, period: int = 14, oversold: float = 30.0, overbought: float = 70.0,
+        self,
+        period: int = 14,
+        oversold: float = 30.0,
+        overbought: float = 70.0,
         size: float = 100.0,
     ) -> None:
         super().__init__(period=period, oversold=oversold, overbought=overbought, size=size)
@@ -36,11 +40,11 @@ class Momentum(Strategy):
         rs = avg_gain / avg_loss
         return 100.0 - (100.0 / (1.0 + rs))
 
-    def on_bar(self, idx: int, history: pd.DataFrame) -> list[Order]:
-        if idx < self.period + 1:
+    def on_bar(self, ctx: BarContext) -> list[Order]:
+        if ctx.idx < self.period + 1:
             return []
 
-        closes = history["close"].iloc[: idx + 1]
+        closes = ctx.history()["close"]
         rsi = self._rsi(closes)
 
         if rsi < self.oversold and not self.in_position:

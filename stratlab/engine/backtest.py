@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from functools import reduce
 from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
 
 from stratlab.engine.broker import Broker
+from stratlab.engine.context import BarContext
 
 if TYPE_CHECKING:
     from stratlab.strategies.base import Strategy
@@ -22,7 +24,14 @@ class BacktestResult:
 
 @dataclass
 class Backtest:
-    """Vectorized backtest engine that runs a strategy over OHLCV data."""
+    """Backtest engine that runs a strategy over multi-asset OHLCV data.
+
+    Symbols are aligned onto a common date index (the union of each frame's
+    index). At each bar, only symbols with a valid close are considered
+    *tradeable* — orders for not-yet-listed or delisted names are silently
+    skipped. Held positions are marked-to-market at the last known close, so
+    delisting doesn't vanish a position from the equity curve.
+    """
 
     data: dict[str, pd.DataFrame]
     strategy: Strategy
@@ -42,34 +51,56 @@ class Backtest:
     def run(self) -> BacktestResult:
         from stratlab.analytics.metrics import compute_metrics
 
+        if not self.data:
+            raise ValueError("Backtest.data is empty")
+
         self.broker.reset()
 
-        symbols = list(self.data.keys())
-        primary = self.data[symbols[0]]
-        n_bars = len(primary)
+        common_index = reduce(lambda a, b: a.union(b), (df.index for df in self.data.values()))
+        common_index = common_index.sort_values()
+        aligned = {sym: df.reindex(common_index) for sym, df in self.data.items()}
+        closes_df = pd.DataFrame({sym: df["close"] for sym, df in aligned.items()})
 
+        n_bars = len(common_index)
         equity = np.zeros(n_bars)
-        dates = primary.index
+        last_close: dict[str, float] = {sym: 0.0 for sym in aligned}
 
         self.strategy.on_start()
 
         for i in range(n_bars):
-            orders = self.strategy.on_bar(i, primary)
+            bar_closes = closes_df.iloc[i]
+            tradeable_mask = bar_closes.notna()
+            tradeable = bar_closes.index[tradeable_mask].tolist()
+
+            for sym in tradeable:
+                last_close[sym] = float(bar_closes[sym])
+
+            ctx = BarContext(
+                idx=i,
+                timestamp=common_index[i],
+                symbols=tradeable,
+                _aligned=aligned,
+                _closes_df=closes_df,
+                _broker=self.broker,
+            )
+
+            orders = self.strategy.on_bar(ctx)
 
             for order in orders:
                 if not order.symbol:
-                    order.symbol = symbols[0]
-                bar = self.data[order.symbol].iloc[i]
-                self.broker.fill_order(order, bar, dates[i])
+                    if not tradeable:
+                        continue
+                    order.symbol = tradeable[0]
+                if order.symbol not in aligned or pd.isna(closes_df.iloc[i][order.symbol]):
+                    continue
+                bar = aligned[order.symbol].iloc[i]
+                self.broker.fill_order(order, bar, common_index[i])
 
-            prices = {}
-            for sym in symbols:
-                prices[sym] = float(self.data[sym].iloc[i]["close"])
-            equity[i] = self.broker.portfolio_value(prices)
+            equity[i] = self.broker.portfolio_value(last_close)
 
         self.strategy.on_end()
 
-        equity_series = pd.Series(equity, index=dates, name="equity")
+        equity_series = pd.Series(equity, index=common_index, name="equity")
         returns = equity_series.pct_change().fillna(0.0)
         metrics = compute_metrics(equity_series, returns)
         metrics["n_trades"] = len(self.broker.fills)

@@ -4,28 +4,29 @@ from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    import pandas as pd
     from stratlab.engine.broker import Order
+    from stratlab.engine.context import BarContext
 
 
 class Strategy(ABC):
     """Base class for all strategies.
 
-    Subclass and implement `on_bar` to return a list of orders (or empty list to do nothing).
-    Use `self.params` to store tunable parameters.
+    Subclass and implement :meth:`on_bar` to return a list of orders (or empty
+    list to do nothing). Use ``self.params`` to store tunable parameters.
+
+    Strategies receive a :class:`BarContext` rather than raw frames. The
+    context's ``history()`` accessor returns bars sliced to the current index
+    inclusive, so look-ahead bias is structurally prevented for any strategy
+    that uses it. For cross-sectional logic, use ``ctx.closes()`` /
+    ``ctx.closes_window()`` to see all symbols at once.
     """
 
     def __init__(self, **params: float) -> None:
         self.params = params
 
     @abstractmethod
-    def on_bar(self, idx: int, history: pd.DataFrame) -> list[Order]:
-        """Called on each bar. Return orders to execute.
-
-        Args:
-            idx: Current bar index (0-based). history[:idx+1] is visible data.
-            history: Full OHLCV dataframe. Only use rows up to idx to avoid look-ahead bias.
-        """
+    def on_bar(self, ctx: BarContext) -> list[Order]:
+        """Called on each bar. Return orders to execute."""
         ...
 
     def on_start(self) -> None:

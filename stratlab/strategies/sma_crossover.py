@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import pandas as pd
-
 from stratlab.engine.broker import Order, OrderSide
+from stratlab.engine.context import BarContext
 from stratlab.strategies.base import Strategy
 
 
 class SMACrossover(Strategy):
-    """Simple moving average crossover strategy.
+    """Simple moving average crossover strategy (single-asset).
 
     Buys when fast SMA crosses above slow SMA, sells when it crosses below.
     """
@@ -19,11 +18,11 @@ class SMACrossover(Strategy):
         self.size = size
         self.in_position = False
 
-    def on_bar(self, idx: int, history: pd.DataFrame) -> list[Order]:
-        if idx < self.slow:
+    def on_bar(self, ctx: BarContext) -> list[Order]:
+        if ctx.idx < self.slow:
             return []
 
-        closes = history["close"].iloc[: idx + 1]
+        closes = ctx.history()["close"]
         fast_sma = closes.iloc[-self.fast :].mean()
         slow_sma = closes.iloc[-self.slow :].mean()
 
@@ -33,12 +32,10 @@ class SMACrossover(Strategy):
         prev_fast = prev_closes.iloc[-self.fast :].mean()
         prev_slow = prev_closes.iloc[-self.slow :].mean()
 
-        # crossover: fast crosses above slow
         if prev_fast <= prev_slow and fast_sma > slow_sma and not self.in_position:
             self.in_position = True
             return [Order(side=OrderSide.BUY, size=self.size)]
 
-        # crossunder: fast crosses below slow
         if prev_fast >= prev_slow and fast_sma < slow_sma and self.in_position:
             self.in_position = False
             return [Order(side=OrderSide.SELL, size=self.size)]

@@ -41,17 +41,54 @@ print(result.metrics)
 ### Write your own strategy
 
 ```python
-from stratlab import Strategy, Order
+from stratlab import Strategy, Order, BarContext
 from stratlab.engine.broker import OrderSide
 
 class MyStrategy(Strategy):
-    def on_bar(self, idx, history):
-        if idx < 20:
+    def on_bar(self, ctx: BarContext):
+        if ctx.idx < 20:
             return []
-        closes = history["close"].iloc[:idx+1]
+        closes = ctx.history()["close"]  # already sliced to [0, idx]
         if closes.iloc[-1] > closes.iloc[-20:].mean():
             return [Order(side=OrderSide.BUY, size=100)]
         return []
+```
+
+### Cross-sectional strategy across many symbols
+
+```python
+from stratlab import Backtest, Strategy, Order, BarContext, load_universe, sp500_tickers
+from stratlab.engine.broker import OrderSide
+
+class TopKMomentum(Strategy):
+    """Each month, equal-weight the top K names by 12-1 month return."""
+    def __init__(self, k=10, lookback=252, skip=21, rebalance=21):
+        super().__init__()
+        self.k, self.lookback, self.skip, self.rebalance = k, lookback, skip, rebalance
+
+    def on_bar(self, ctx: BarContext):
+        if ctx.idx < self.lookback or ctx.idx % self.rebalance:
+            return []
+        prices = ctx.closes_window(self.lookback)
+        ret = prices.iloc[-self.skip] / prices.iloc[0] - 1.0
+        winners = ret.dropna().sort_values().tail(self.k).index.tolist()
+
+        orders = []
+        for sym, pos in ctx.positions.items():
+            if sym not in winners and pos.size > 0:
+                orders.append(Order(side=OrderSide.SELL, size=pos.size, symbol=sym))
+
+        budget = ctx.cash / max(len(winners), 1)
+        for sym in winners:
+            price = float(ctx.closes()[sym])
+            size = budget // price
+            if size > 0 and ctx.position(sym).size == 0:
+                orders.append(Order(side=OrderSide.BUY, size=size, symbol=sym))
+        return orders
+
+data = load_universe(sp500_tickers(), start="2020-01-01")
+bt = Backtest(data=data, strategy=TopKMomentum(k=20))
+print(bt.run().metrics)
 ```
 
 ### Train an RL agent
