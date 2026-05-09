@@ -357,11 +357,13 @@ python -m stratlab.refresh --tickers AAPL MSFT   # specific tickers
 
 python -m stratlab.news.npr                      # NPR scraper (date-archive)
 python -m stratlab.news.bbc                      # BBC scraper (RSS)
-python -m stratlab.news.ap                       # AP News (topic hubs)
 python -m stratlab.news.kyodo                    # Kyodo News English (per-year sitemaps)
-
-python -m stratlab.news.cna                      # CNA — DEPRECATED, kept opt-in only
 ```
+
+AP and CNA were previously included as latest-only sources but were
+removed because their public surfaces don't expose historical archives.
+See `docs/archive/news_scrapers_ap_cna.md` if you want to revive
+either as a daily-only feed.
 
 For deep historical news, the dedicated backfill job is **separate** from
 the daily refresh — three sources expose public archives:

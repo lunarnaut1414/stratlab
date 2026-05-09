@@ -15,9 +15,9 @@ Example::
     from stratlab.news.features import daily_sentiment
 
     sent = daily_sentiment(start="2024-01-01", end="2024-12-31",
-                            sources=["npr", "ap"], topics=["business", "economy"])
+                            sources=["npr", "kyodo"], topics=["business", "japan"])
     # → DataFrame indexed by date with columns
-    #   ('npr', 'business'), ('npr', 'economy'), ('ap', 'business'), ...
+    #   ('npr', 'business'), ('kyodo', 'japan'), ...
 
     # Or just one number per day across everything:
     overall = sent.mean(axis=1)

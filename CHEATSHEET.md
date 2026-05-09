@@ -14,9 +14,9 @@ python -m stratlab.refresh_all --quiet      # only summaries
 ```
 
 Pulls market data (~850 tickers) and recent articles (~7-day window)
-from NPR, BBC, AP, and Kyodo. Pipelines run in parallel by default
+from NPR, BBC, and Kyodo. Pipelines run in parallel by default
 (different domains don't compete on rate-limits), so wall-clock is
-`max(market, npr, bbc, ap, kyodo)` — typically 5-15 minutes warm.
+`max(market, npr, bbc, kyodo)` — typically 5-15 minutes warm.
 Output interleaves; `--serial` for clean ordered output. Idempotent:
 re-running the same day finishes in seconds.
 
@@ -24,10 +24,12 @@ re-running the same day finishes in seconds.
 yesterday. For historical backfill, see the dedicated `news.backfill`
 command below.
 
-CNA was the original Asian source but is **deprecated** as of the
-Kyodo migration — Kyodo English has 9 years of public archive
-(2017+) vs CNA's 50-most-recent feed. CNA still runs as a standalone
-command if you want it, but it's no longer in the daily refresh.
+AP and CNA were originally included as latest-only sources but were
+removed because their public surfaces don't expose historical archives
+(both are limited to ~50-100 most-recent articles). Implementation
+notes for either one are preserved in
+`docs/archive/news_scrapers_ap_cna.md` if you want to revive them as
+daily-only feeds.
 
 ---
 
@@ -41,8 +43,6 @@ news from the three sources whose archives expose it:
 | NPR | back to ~2000 | date-archive walker (`/sections/<topic>/archive?date=...`) |
 | BBC | back to ~2009 | XML sitemap (`https-index-com-archive.xml`) |
 | Kyodo | back to 2017 | per-year sitemaps (`sitemap-2017.xml` … `sitemap-<current>.xml`) |
-| AP  | none | (run daily refresh on cron to accumulate) |
-| CNA | none | (deprecated; opt-in only) |
 
 ```bash
 # All three sources at full depth, run sequentially (default)
@@ -84,10 +84,7 @@ Sometimes you want one without the others:
 python -m stratlab.refresh                    # market only
 python -m stratlab.news.npr                   # NPR only (date-archive walker)
 python -m stratlab.news.bbc                   # BBC only (RSS-driven)
-python -m stratlab.news.ap                    # AP only (topic-hub walker)
 python -m stratlab.news.kyodo                 # Kyodo News English (per-year sitemaps)
-
-python -m stratlab.news.cna                   # CNA — deprecated, opt-in only
 ```
 
 Each news source has its own topic vocabulary and own `--topics` choices.
@@ -123,6 +120,19 @@ python -m stratlab.news.npr --quiet
 # BBC historical backfill via sitemap (covers ~2009 → today; --years scopes depth)
 python -m stratlab.news.bbc --from-sitemap --years 1 --workers 4
 python -m stratlab.news.bbc --from-sitemap --since 2024-01-01 --workers 4
+
+# 1 year 
+python -m stratlab.news.kyodo --days 365 --workers 4
+
+# Or absolute start date — more idiomatic for backfill
+python -m stratlab.news.kyodo --since 2025-05-09 --workers 4
+
+# Full archive (back to 2017, ~90K articles, ~8-12 hrs)
+python -m stratlab.news.kyodo --since 2017-01-01 --workers 4
+
+# Even faster (smaller sleep, more workers)
+python -m stratlab.news.kyodo --since 2017-01-01 --workers 6 --sleep 0.5
+
 ```
 
 News storage is one JSON per `(source, topic, day)`:
@@ -162,7 +172,7 @@ from stratlab import daily_sentiment
 
 # Default: one column per (source, topic), values = mean net sentiment
 sent = daily_sentiment(start="2024-01-01", end="2024-12-31",
-                       sources=["npr", "ap", "kyodo"], topics=["business"])
+                       sources=["npr", "bbc", "kyodo"], topics=["business"])
 
 # Full breakdown: pos/neg/neutral/article_count per (source, topic)
 sent_full = daily_sentiment(start="2024-01-01", breakdown=True)
