@@ -11,6 +11,7 @@ from stratlab.engine.broker import Broker
 from stratlab.engine.context import BarContext
 
 if TYPE_CHECKING:
+    from stratlab.analytics.trades import Trade
     from stratlab.strategies.base import Strategy
 
 
@@ -19,6 +20,7 @@ class BacktestResult:
     equity_curve: pd.Series
     returns: pd.Series
     fills: list
+    trades: list[Trade]
     metrics: dict[str, float]
 
 
@@ -59,6 +61,11 @@ class Backtest:
 
     def run(self) -> BacktestResult:
         from stratlab.analytics.metrics import compute_metrics
+        from stratlab.analytics.trades import (
+            annualized_turnover,
+            extract_trades,
+            trade_stats,
+        )
 
         if not self.data:
             raise ValueError("Backtest.data is empty")
@@ -139,13 +146,20 @@ class Backtest:
         equity_series = pd.Series(equity, index=common_index, name="equity")
         returns = equity_series.pct_change().fillna(0.0)
         metrics = compute_metrics(equity_series, returns)
-        metrics["n_trades"] = len(self.broker.fills)
+
+        fills = list(self.broker.fills)
+        trades = extract_trades(fills)
+
+        metrics["n_trades"] = len(fills)
         metrics["dropped_orders"] = dropped_orders
-        metrics["borrow_cost"] = total_borrow_cost
+        metrics["borrow_cost"] = round(total_borrow_cost, 2)
+        metrics["turnover_annualized"] = annualized_turnover(fills, equity_series)
+        metrics.update(trade_stats(trades))
 
         return BacktestResult(
             equity_curve=equity_series,
             returns=returns,
-            fills=list(self.broker.fills),
+            fills=fills,
+            trades=trades,
             metrics=metrics,
         )

@@ -128,14 +128,29 @@ The `TradingEnv` follows the standard Gymnasium API:
 
 Every backtest returns:
 
-- **Total Return** — overall P&L
-- **CAGR** — compound annual growth rate
-- **Sharpe Ratio** — risk-adjusted return
-- **Sortino Ratio** — downside risk-adjusted return
-- **Max Drawdown** — worst peak-to-trough decline
-- **Annual Volatility** — annualized standard deviation
-- **Calmar Ratio** — CAGR / max drawdown
-- **Win Rate** — percentage of positive-return bars
+**Return / risk**
+- `total_return`, `cagr`, `sharpe`, `sortino`, `calmar`
+- `max_drawdown`, `annual_volatility`
+- `win_rate` — percentage of positive-return *bars* (not trades)
+
+**Activity & costs**
+- `n_trades` — individual fills
+- `n_round_trips` — paired entries → exits (real "trades")
+- `turnover_annualized` — total notional / avg equity, per year. A long/short
+  monthly rebalance commonly runs 10x+; at 10 bps round-trip costs that's 100
+  bps drag.
+- `borrow_cost` — dollars charged on short notional (only nonzero when
+  `borrow_rate_annual > 0`)
+- `dropped_orders` — orders that couldn't fill (last bar, NaN open, etc.)
+
+**Trade-level**
+- `trade_win_rate` — fraction of round trips with positive PnL
+- `profit_factor` — sum of winning PnL / |sum of losing PnL|. <1.0 means
+  losses outweigh wins even before costs.
+- `avg_winner_pnl`, `avg_loser_pnl`, `avg_holding_days`, `avg_trade_return`
+
+`BacktestResult.trades` contains the full list of `Trade` records — symbol,
+side (long/short), entry/exit time and price, size, gross PnL, return %.
 
 ## Broker Simulation
 
