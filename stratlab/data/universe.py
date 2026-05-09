@@ -13,6 +13,7 @@ import yfinance as yf
 from stratlab.data._etf_lists import INVERSE_ETFS, LEVERAGED_ETFS, POPULAR_ETFS
 from stratlab.data.provider import (
     CACHE_DIR,
+    INDICES_DIR,
     _cache_path,
     _covers,
     _merge_cache,
@@ -50,7 +51,7 @@ def _scrape_index_tickers(
     safer than indexing by table position, since Wikipedia editors rearrange
     tables. Tickers are Yahoo-formatted (``.`` → ``-``).
     """
-    cache_path = CACHE_DIR / cache_name
+    cache_path = INDICES_DIR / cache_name
     if use_cache and cache_path.exists():
         payload = json.loads(cache_path.read_text())
         fetched_at = datetime.fromisoformat(payload["fetched_at"])
@@ -80,9 +81,9 @@ def _scrape_index_tickers(
     tickers = [str(t).replace(".", "-").strip() for t in chosen[chosen_col].tolist()]
     tickers = [t for t in tickers if t and t.lower() != "nan"]
 
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    INDICES_DIR.mkdir(parents=True, exist_ok=True)
     cache_path.write_text(
-        json.dumps({"fetched_at": datetime.now().isoformat(), "tickers": tickers})
+        json.dumps({"fetched_at": datetime.now().isoformat(), "tickers": tickers}, indent=2)
     )
     return tickers
 
@@ -119,12 +120,12 @@ def sp500_tickers(
                 stacklevel=2,
             )
             return _scrape_index_tickers(
-                SP500_WIKI_URL, "sp500_tickers.json",
+                SP500_WIKI_URL, "sp500.json",
                 use_cache=use_cache, max_age_days=max_age_days,
             )
     if source == "wikipedia":
         return _scrape_index_tickers(
-            SP500_WIKI_URL, "sp500_tickers.json",
+            SP500_WIKI_URL, "sp500.json",
             use_cache=use_cache, max_age_days=max_age_days,
         )
     raise ValueError(f"unknown source {source!r}; expected 'spy' or 'wikipedia'")
@@ -137,7 +138,7 @@ def _sp500_from_spy(use_cache: bool = True, max_age_days: int = 7) -> list[str]:
     locate the header row by searching for the ``Ticker`` column rather than
     hardcoding ``skiprows``. Cash, futures, and unidentified rows are dropped.
     """
-    cache_path = CACHE_DIR / "sp500_tickers.json"
+    cache_path = INDICES_DIR / "sp500.json"
     if use_cache and cache_path.exists():
         payload = json.loads(cache_path.read_text())
         fetched_at = datetime.fromisoformat(payload["fetched_at"])
@@ -181,9 +182,9 @@ def _sp500_from_spy(use_cache: bool = True, max_age_days: int = 7) -> list[str]:
     if not tickers:
         raise ValueError("SPY holdings file parsed but yielded no tickers")
 
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    INDICES_DIR.mkdir(parents=True, exist_ok=True)
     cache_path.write_text(
-        json.dumps({"fetched_at": datetime.now().isoformat(), "tickers": tickers})
+        json.dumps({"fetched_at": datetime.now().isoformat(), "tickers": tickers}, indent=2)
     )
     return tickers
 
@@ -191,7 +192,7 @@ def _sp500_from_spy(use_cache: bool = True, max_age_days: int = 7) -> list[str]:
 def nasdaq100_tickers(use_cache: bool = True, max_age_days: int = 7) -> list[str]:
     """Current Nasdaq-100 constituents, scraped from Wikipedia."""
     return _scrape_index_tickers(
-        NASDAQ100_WIKI_URL, "nasdaq100_tickers.json",
+        NASDAQ100_WIKI_URL, "nasdaq100.json",
         use_cache=use_cache, max_age_days=max_age_days,
     )
 
@@ -199,7 +200,7 @@ def nasdaq100_tickers(use_cache: bool = True, max_age_days: int = 7) -> list[str
 def dow30_tickers(use_cache: bool = True, max_age_days: int = 7) -> list[str]:
     """Current Dow Jones Industrial Average constituents, scraped from Wikipedia."""
     return _scrape_index_tickers(
-        DOW30_WIKI_URL, "dow30_tickers.json",
+        DOW30_WIKI_URL, "dow30.json",
         use_cache=use_cache, max_age_days=max_age_days,
     )
 

@@ -3,22 +3,29 @@
 Usage:
     python -m stratlab.refresh                       # full default universe
     python -m stratlab.refresh --tickers AAPL MSFT   # specific tickers
-    python -m stratlab.refresh --start 2015-01-01    # backfill more history
+    python -m stratlab.refresh --start 2015-01-01    # truncate to this start
     python -m stratlab.refresh --interval 1d         # daily (the default)
+
+Cache layout::
+
+    data/market/
+      catalog.json
+      indices/{sp500,nasdaq100,dow30}.json
+      stocks/<gics_sector>/<TICKER>_1d.csv
+      etfs/<category>/<TICKER>_1d.csv
+      uncategorized/<TICKER>_1d.csv
 
 For each ticker:
 - If no cache exists, fetch ``[start, today]`` from yfinance.
-- If cache exists, fetch only ``[last_cached_date + 1, today]`` and append.
-
-All fetches go through ``yf.download``'s threaded batch endpoint, grouped by
-"needs full" vs. "needs partial" so cold tickers and warm tickers don't share
-a download. Cache files live in ``~/.stratlab/cache/`` as one CSV per
-``(symbol, interval)``.
+- If cache exists but is shallower than ``--start``, re-fetch the full range.
+- If cache covers ``--start`` but stops before today, fetch only the gap.
+- If cache covers both edges, skip without a network call.
 """
 from __future__ import annotations
 
 import argparse
 import re
+import shutil
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -26,14 +33,28 @@ from pathlib import Path
 import pandas as pd
 import yfinance as yf
 
+from stratlab.data.catalog import (
+    CATALOG_VERSION,
+    UNCATEGORIZED,
+    build_catalog,
+    category_for,
+    load_catalog,
+    save_catalog,
+)
 from stratlab.data.provider import (
     CACHE_DIR,
+    CATALOG_PATH,
+    INDICES_DIR,
+    MARKET_DIR,
     _cache_path,
+    _invalidate_catalog_cache,
     _merge_cache,
     _normalize,
     _read_cache,
     _write_cache,
 )
+
+LEGACY_HOME_CACHE = Path.home() / ".stratlab" / "cache"
 
 # Old cache layout: {symbol}_{interval}_{16hex}.csv. New layout has no hash
 # suffix, so anything matching this pattern is an orphan and can be deleted.
@@ -52,8 +73,9 @@ class RefreshSummary:
     up_to_date: list[str] = field(default_factory=list)  # cache already covered today
     failed: list[str] = field(default_factory=list)      # no data returned
     orphans_removed: int = 0
+    migrated_files: int = 0
     new_bars: int = 0
-    cache_dir: Path = CACHE_DIR
+    cache_dir: Path = MARKET_DIR
 
     def total(self) -> int:
         return (
@@ -65,7 +87,7 @@ class RefreshSummary:
         )
 
 
-def cleanup_orphan_cache_files(cache_dir: Path = CACHE_DIR) -> int:
+def cleanup_orphan_cache_files(cache_dir: Path = MARKET_DIR) -> int:
     """Delete cache files left behind by the pre-refactor hash-keyed layout.
 
     The old layout wrote ``{symbol}_{interval}_{hash}.csv`` (one file per
@@ -73,16 +95,105 @@ def cleanup_orphan_cache_files(cache_dir: Path = CACHE_DIR) -> int:
     (one file per symbol holding all bars). The current code never reads or
     updates the old files, so they're pure disk waste.
 
-    Returns the count of files removed.
+    Walks recursively to also catch orphans inside category subfolders. Also
+    sweeps the legacy ``~/.stratlab/cache/`` location if it still exists.
     """
-    if not cache_dir.exists():
-        return 0
     removed = 0
-    for path in cache_dir.glob("*.csv"):
-        if _ORPHAN_CACHE_RE.match(path.name):
-            path.unlink()
-            removed += 1
+    for root in {cache_dir, LEGACY_HOME_CACHE}:
+        if not root.exists():
+            continue
+        for path in root.rglob("*.csv"):
+            if _ORPHAN_CACHE_RE.match(path.name):
+                path.unlink()
+                removed += 1
     return removed
+
+
+def migrate_legacy_cache(verbose: bool = True) -> int:
+    """Move files from ``~/.stratlab/cache/`` into the categorized ``MARKET_DIR``.
+
+    Idempotent — once the legacy location is empty the function no-ops. Files
+    that already exist at the destination are skipped (the merge-on-fetch logic
+    will reconcile them next time refresh runs). Returns the count of files
+    moved (0 if nothing to migrate).
+    """
+    if MARKET_DIR.resolve() == LEGACY_HOME_CACHE.resolve():
+        return 0
+    if not LEGACY_HOME_CACHE.exists():
+        return 0
+
+    legacy_csvs = list(LEGACY_HOME_CACHE.glob("*.csv"))
+    legacy_jsons = list(LEGACY_HOME_CACHE.glob("*.json"))
+    if not legacy_csvs and not legacy_jsons:
+        return 0
+
+    if verbose:
+        print(f"Migrating legacy cache: {LEGACY_HOME_CACHE} → {MARKET_DIR}")
+
+    # Make sure we have a catalog so we know where each ticker goes.
+    catalog = load_catalog(CATALOG_PATH)
+    if catalog is None:
+        try:
+            catalog = build_catalog()
+            save_catalog(catalog, CATALOG_PATH)
+            _invalidate_catalog_cache()
+        except Exception as exc:
+            if verbose:
+                print(f"  Warning: catalog build failed ({exc!r}); using uncategorized")
+            catalog = None
+
+    moved = 0
+    skipped = 0
+    name_re = re.compile(r"^(?P<sym>.+)_(?P<intv>\w+)\.csv$")
+    for src in legacy_csvs:
+        m = name_re.match(src.name)
+        if not m:
+            continue
+        symbol = m.group("sym")
+        category = category_for(symbol, catalog) if catalog else UNCATEGORIZED
+        dest = MARKET_DIR / category / src.name
+        if dest.exists():
+            skipped += 1
+            continue
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(src), str(dest))
+        moved += 1
+
+    # JSON index files: ~/.stratlab/cache/sp500_tickers.json → indices/sp500.json
+    INDICES_DIR.mkdir(parents=True, exist_ok=True)
+    for src in legacy_jsons:
+        new_name = src.name.replace("_tickers", "")
+        dest = INDICES_DIR / new_name
+        if dest.exists():
+            skipped += 1
+            continue
+        shutil.move(str(src), str(dest))
+        moved += 1
+
+    if verbose and moved:
+        msg = f"  moved {moved} file(s)"
+        if skipped:
+            msg += f", skipped {skipped} (destination already exists)"
+        print(msg)
+
+    return moved
+
+
+def refresh_catalog(verbose: bool = True) -> dict | None:
+    """Rebuild ``catalog.json`` from current sources and invalidate caches."""
+    try:
+        catalog = build_catalog()
+    except Exception as exc:
+        if verbose:
+            print(f"  Warning: catalog rebuild failed ({exc!r})")
+        return None
+    save_catalog(catalog, CATALOG_PATH)
+    _invalidate_catalog_cache()
+    if verbose:
+        n_stocks = len(catalog.get("stocks", {}))
+        n_etfs = len(catalog.get("etfs", {}))
+        print(f"Catalog: {n_stocks} stocks (by GICS sector) + {n_etfs} ETFs (by category)")
+    return catalog
 
 
 def refresh_universe(
@@ -113,9 +224,16 @@ def refresh_universe(
     last_bday = pd.bdate_range(end=end_ts, periods=1)[0]
     summary = RefreshSummary()
 
-    # Always sweep orphan files from the pre-refactor cache layout. They're
-    # provably never read or updated by current code, so this is safe.
-    orphans = cleanup_orphan_cache_files(CACHE_DIR)
+    # One-time housekeeping on every run (idempotent after first):
+    # 1. Migrate legacy ~/.stratlab/cache/ files into the categorized layout.
+    # 2. Refresh the catalog so new tickers/sector changes are reflected.
+    # 3. Sweep orphan files from the pre-refactor hash-keyed layout.
+    migrated = migrate_legacy_cache(verbose=verbose)
+    summary.migrated_files = migrated
+
+    refresh_catalog(verbose=verbose)
+
+    orphans = cleanup_orphan_cache_files(MARKET_DIR)
     summary.orphans_removed = orphans
     if verbose and orphans:
         print(f"Removed {orphans} orphan cache files from old hash-keyed layout")
@@ -253,7 +371,7 @@ def _merge_one(
 
 
 def _print_summary(summary: RefreshSummary) -> None:
-    cache_files = list(summary.cache_dir.glob("*.csv"))
+    cache_files = list(summary.cache_dir.rglob("*.csv"))
     total_size_mb = sum(f.stat().st_size for f in cache_files) / (1024 * 1024)
 
     print("\n" + "=" * 60)
@@ -267,6 +385,8 @@ def _print_summary(summary: RefreshSummary) -> None:
         preview = summary.failed[:10]
         more = "" if len(summary.failed) <= 10 else f" ... +{len(summary.failed) - 10} more"
         print(f"    failed tickers      : {preview}{more}")
+    if summary.migrated_files:
+        print(f"  files migrated        : {summary.migrated_files}")
     if summary.orphans_removed:
         print(f"  orphan files removed  : {summary.orphans_removed}")
     print(f"\nNew bars added         : {summary.new_bars:,}")

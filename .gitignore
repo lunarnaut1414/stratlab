@@ -4,3 +4,9 @@ __pycache__/
 dist/
 build/
 .eggs/
+.venv/
+.DS_Store
+
+# Local data lake — large, machine-specific, regeneratable via
+# `python -m stratlab.refresh`. Don't commit market data.
+data/market/

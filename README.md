@@ -177,10 +177,39 @@ metrics dict. Held positions are marked-to-market at each bar's close.
 
 ## Data
 
-Market data is fetched via yfinance and cached as CSV files in
-`~/.stratlab/cache/` (one file per `(symbol, interval)`, holding every bar
-ever fetched). Pass `use_cache=False` to `load_bars()` to force a fresh
-download.
+Market data is fetched via yfinance and cached locally as CSV files. By
+default the cache lives at `<project_root>/data/market/` if you're inside a
+project (detected via `pyproject.toml` or `.git`); otherwise it falls back to
+`~/.stratlab/cache/`. Override with `STRATLAB_CACHE_DIR=...`.
+
+### Layout
+
+```
+data/market/
+  catalog.json                  # ticker → sector/category map (auto-built)
+  indices/
+    sp500.json                  # current basket from SSGA SPY holdings
+    nasdaq100.json              # scraped from Wikipedia
+    dow30.json
+  stocks/
+    information_technology/AAPL_1d.csv
+    financials/JPM_1d.csv
+    energy/XOM_1d.csv
+    ... (11 GICS sectors)
+  etfs/
+    broad_market/SPY_1d.csv
+    sector/XLF_1d.csv
+    leveraged/TQQQ_1d.csv
+    inverse/SH_1d.csv
+    bonds/TLT_1d.csv
+    ... (broad_market, factor, sector, industry, thematic, international_developed,
+         international_emerging, bonds, commodities, real_estate, currency,
+         volatility, crypto, leveraged, inverse)
+  uncategorized/                # tickers not in the catalog
+```
+
+`catalog.json` is the authoritative ticker → category map. Inspect it to see
+what we know about each symbol.
 
 ### Refresh the local cache
 
