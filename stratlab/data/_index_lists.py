@@ -21,7 +21,6 @@ INDEX_CATEGORIES: dict[str, list[str]] = {
         "^SKEW",      # CBOE Skew Index — tail risk
         "^OVX",       # CBOE Crude Oil VIX
         "^GVZ",       # CBOE Gold VIX
-        "^EVZ",       # CBOE Euro Currency VIX
         "^MOVE",      # ICE BofA Treasury volatility
     ],
     "equity": [
@@ -31,7 +30,6 @@ INDEX_CATEGORIES: dict[str, list[str]] = {
         "^NDX",       # NASDAQ-100
         "^RUT",       # Russell 2000
         "^MID",       # S&P 400 Mid Cap
-        "^SML",       # S&P 600 Small Cap
         "^NYA",       # NYSE Composite
         "^XAX",       # NYSE AMEX Composite
     ],

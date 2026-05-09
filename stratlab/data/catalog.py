@@ -27,7 +27,7 @@ from stratlab.data._index_lists import INDEX_CATEGORIES, index_category_map
 _USER_AGENT = "stratlab/0.1 (https://github.com/lunarnaut1414/stratlab) python-requests"
 SP500_WIKI_URL = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
 
-CATALOG_VERSION = 2
+CATALOG_VERSION = 3
 UNCATEGORIZED = "uncategorized"
 
 

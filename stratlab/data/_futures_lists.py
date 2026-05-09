@@ -63,7 +63,6 @@ FUTURES_CATEGORIES: dict[str, list[str]] = {
         "ZF=F",      # 5-year T-note
         "ZT=F",      # 2-year T-note
         "ZQ=F",      # 30-day Fed Funds
-        "GE=F",      # Eurodollar (legacy; replaced by SR3 in 2023)
     ],
     "currency": [
         "6E=F",      # Euro FX

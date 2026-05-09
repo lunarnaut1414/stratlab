@@ -27,7 +27,9 @@ import argparse
 import re
 import shutil
 import sys
+import time
 from dataclasses import dataclass, field
+from datetime import date, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -60,9 +62,21 @@ LEGACY_HOME_CACHE = Path.home() / ".stratlab" / "cache"
 # suffix, so anything matching this pattern is an orphan and can be deleted.
 _ORPHAN_CACHE_RE = re.compile(r"^.+_\w+_[0-9a-f]{16}\.csv$")
 
-# Sentinel for "as far back as Yahoo will give us." yfinance accepts arbitrary
-# start dates and returns whatever history exists per ticker.
-MAX_HISTORY_START = "1900-01-01"
+# Yahoo's daily-granularity API rejects requests spanning more than 100 years.
+# Pin the "max history" floor at today minus ~99.5 years so we stay well inside
+# the limit. (The longest-running tickers — ^GSPC since 1927 — fit comfortably.)
+def _max_history_start() -> str:
+    return (date.today() - timedelta(days=int(365.25 * 99))).strftime("%Y-%m-%d")
+
+
+MAX_HISTORY_START = _max_history_start()
+
+# yf.download saturates the connection pool when given 800+ tickers at once
+# (DNS resolution failures, dropped responses). Chunk into manageable groups
+# so each batch fits well within macOS / urllib defaults.
+BATCH_CHUNK_SIZE = 100
+INTER_CHUNK_SLEEP = 0.5  # gentle pause between chunks
+MAX_RETRIES = 2          # retry transient failures once before giving up
 
 
 @dataclass
@@ -339,7 +353,7 @@ def refresh_universe(
         if verbose:
             print(f"\nFetching {len(full_fetch)} cold/backfill tickers [{start} → {end}]...")
         added = _batch_fetch_and_merge(
-            full_fetch, start, end, interval, cached_by_sym, summary
+            full_fetch, start, end, interval, cached_by_sym, summary, verbose=verbose
         )
         summary.new_bars += added
         if verbose:
@@ -350,7 +364,7 @@ def refresh_universe(
         if verbose:
             print(f"\nFetching {len(forward_only)} warm tickers [{earliest} → {end}]...")
         added = _batch_fetch_and_merge(
-            list(forward_only.keys()), earliest, end, interval, cached_by_sym, summary
+            list(forward_only.keys()), earliest, end, interval, cached_by_sym, summary, verbose=verbose
         )
         summary.new_bars += added
         if verbose:
@@ -369,40 +383,98 @@ def _batch_fetch_and_merge(
     interval: str,
     cached_by_sym: dict[str, pd.DataFrame | None],
     summary: RefreshSummary,
+    verbose: bool = False,
 ) -> int:
+    """Download ``tickers`` in chunks, merging each ticker into its cache.
+
+    Tickers that fail in the first pass are retried once (network blips and
+    rate-limit hiccups are common when fetching hundreds of names). Stable
+    failures are added to ``summary.failed``.
+    """
     if not tickers:
         return 0
 
-    raw = yf.download(
-        tickers,
-        start=start,
-        end=end,
-        interval=interval,
-        auto_adjust=True,
-        group_by="ticker",
-        progress=False,
-        threads=True,
-    )
-
     new_bars_total = 0
+    failures: list[str] = []
+
+    chunks = [tickers[i:i + BATCH_CHUNK_SIZE] for i in range(0, len(tickers), BATCH_CHUNK_SIZE)]
+    for chunk_idx, chunk in enumerate(chunks):
+        if verbose and len(chunks) > 1:
+            print(f"  chunk {chunk_idx + 1}/{len(chunks)} ({len(chunk)} tickers)...")
+        added, fails = _fetch_chunk(chunk, start, end, interval, cached_by_sym, summary)
+        new_bars_total += added
+        failures.extend(fails)
+        if chunk_idx < len(chunks) - 1:
+            time.sleep(INTER_CHUNK_SLEEP)
+
+    # Retry transient failures once.
+    if failures and MAX_RETRIES > 0:
+        if verbose:
+            print(f"  retrying {len(failures)} transient failure(s)...")
+        time.sleep(2.0)
+        retry_failures: list[str] = []
+        for chunk in [failures[i:i + BATCH_CHUNK_SIZE] for i in range(0, len(failures), BATCH_CHUNK_SIZE)]:
+            added, fails = _fetch_chunk(chunk, start, end, interval, cached_by_sym, summary)
+            new_bars_total += added
+            retry_failures.extend(fails)
+        summary.failed.extend(retry_failures)
+    else:
+        summary.failed.extend(failures)
+
+    return new_bars_total
+
+
+def _fetch_chunk(
+    tickers: list[str],
+    start: str,
+    end: str,
+    interval: str,
+    cached_by_sym: dict[str, pd.DataFrame | None],
+    summary: RefreshSummary,
+) -> tuple[int, list[str]]:
+    """Single yf.download for a chunk of tickers. Returns (bars_added, failed)."""
+    try:
+        raw = yf.download(
+            tickers,
+            start=start,
+            end=end,
+            interval=interval,
+            auto_adjust=True,
+            group_by="ticker",
+            progress=False,
+            threads=True,
+        )
+    except Exception:
+        return 0, list(tickers)
+
     if raw.empty:
-        summary.failed.extend(tickers)
-        return 0
+        return 0, list(tickers)
+
+    new_bars = 0
+    failed: list[str] = []
 
     if len(tickers) == 1:
         sym = tickers[0]
-        added = _merge_one(sym, raw, cached_by_sym.get(sym), interval, summary)
-        new_bars_total += added
-    else:
-        top_level = raw.columns.get_level_values(0)
-        for sym in tickers:
-            if sym not in top_level:
-                summary.failed.append(sym)
-                continue
-            added = _merge_one(sym, raw[sym], cached_by_sym.get(sym), interval, summary)
-            new_bars_total += added
+        try:
+            added = _merge_one(sym, raw, cached_by_sym.get(sym), interval, summary)
+            new_bars += added
+            if added == 0 and (cached_by_sym.get(sym) is None or cached_by_sym[sym].empty):
+                failed.append(sym)
+        except Exception:
+            failed.append(sym)
+        return new_bars, failed
 
-    return new_bars_total
+    top_level = raw.columns.get_level_values(0) if hasattr(raw.columns, "get_level_values") else []
+    for sym in tickers:
+        if sym not in top_level:
+            failed.append(sym)
+            continue
+        try:
+            added = _merge_one(sym, raw[sym], cached_by_sym.get(sym), interval, summary)
+            new_bars += added
+        except Exception:
+            failed.append(sym)
+    return new_bars, failed
 
 
 def _merge_one(
@@ -412,10 +484,15 @@ def _merge_one(
     interval: str,
     summary: RefreshSummary,
 ) -> int:
+    """Merge ``raw`` (one ticker's fresh download) into the on-disk cache.
+
+    Returns the number of new bars added. Raises ``ValueError`` on empty fresh
+    data so the caller can treat it as a transient failure (eligible for
+    retry); the chunk dispatcher decides whether to mark it as failed.
+    """
     fresh = raw.dropna(how="all")
     if fresh.empty:
-        summary.failed.append(symbol)
-        return 0
+        raise ValueError(f"no fresh data for {symbol}")
 
     fresh = _normalize(fresh)
     new_count = len(fresh) if cached is None else len(fresh.index.difference(cached.index))
