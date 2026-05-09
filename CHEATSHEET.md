@@ -7,12 +7,17 @@ The minimum you need to know to run, query, and backtest.
 ## Daily refresh — the one-command answer
 
 ```bash
-python -m stratlab.refresh_all
+python -m stratlab.refresh_all              # parallel (default)
+python -m stratlab.refresh_all --serial     # one at a time, clean output
+python -m stratlab.refresh_all --quiet      # only summaries
 ```
 
 Pulls market data (~850 tickers) and recent articles from NPR, BBC, and
-AP. Idempotent: re-running the same day fetches nothing new and finishes
-in seconds.
+AP. The four pipelines run in parallel by default (different domains
+don't compete on rate-limits), so wall-clock is `max(market, npr, bbc,
+ap)` — typically 5-15 minutes warm. Output interleaves; `--serial` for
+clean ordered output. Idempotent: re-running the same day finishes in
+seconds.
 
 The first run is slow (~5-10 min) because it cold-fetches max history per
 ticker. Every run after that just appends yesterday's bar.
