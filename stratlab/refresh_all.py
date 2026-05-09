@@ -70,27 +70,46 @@ def main() -> int:
         action="store_true",
         help="Suppress per-pipeline progress output (just summaries).",
     )
+    parser.add_argument(
+        "--news-only",
+        action="store_true",
+        help="Skip the market-data refresh; run all news pipelines in parallel.",
+    )
+    parser.add_argument(
+        "--with-sentiment",
+        action="store_true",
+        help="After news scrapers finish, score new articles with FinBERT "
+             "(requires the [sentiment] extra: torch + transformers).",
+    )
     args = parser.parse_args()
 
     today = date.today()
     window_start = today - timedelta(days=7)
     verbose = not args.quiet
     started = time.time()
-    total = 5
+    run_market = not args.news_only
+    total = 5 if run_market else 4
 
+    market = None
     if args.serial:
-        _print_step_header(f"STEP 1 / {total}: Market data")
-        market = _run_market(verbose=verbose)
-        _print_step_header(f"STEP 2 / {total}: NPR (date-archive)")
+        step = 1
+        if run_market:
+            _print_step_header(f"STEP {step} / {total}: Market data")
+            market = _run_market(verbose=verbose)
+            step += 1
+        _print_step_header(f"STEP {step} / {total}: NPR (date-archive)")
         npr_stats = _run_npr(verbose=verbose, window_start=window_start, today=today)
         npr_news._print_summary(npr_stats, window_start, today)
-        _print_step_header(f"STEP 3 / {total}: BBC (RSS)")
+        step += 1
+        _print_step_header(f"STEP {step} / {total}: BBC (RSS)")
         bbc_stats = _run_bbc(verbose=verbose)
         bbc_news._print_summary(bbc_stats)
-        _print_step_header(f"STEP 4 / {total}: AP News (topic hubs)")
+        step += 1
+        _print_step_header(f"STEP {step} / {total}: AP News (topic hubs)")
         ap_stats = _run_ap(verbose=verbose)
         ap_news._print_summary(ap_stats)
-        _print_step_header(f"STEP 5 / {total}: CNA (Singapore)")
+        step += 1
+        _print_step_header(f"STEP {step} / {total}: CNA (Singapore)")
         cna_stats = _run_cna(verbose=verbose)
         cna_news._print_summary(cna_stats)
     else:
@@ -98,13 +117,14 @@ def main() -> int:
             f"Running {total} pipelines in parallel (output will interleave)"
         )
         with ThreadPoolExecutor(max_workers=total) as ex:
-            f_market = ex.submit(_run_market, verbose=verbose)
+            f_market = ex.submit(_run_market, verbose=verbose) if run_market else None
             f_npr = ex.submit(_run_npr, verbose=verbose,
                               window_start=window_start, today=today)
             f_bbc = ex.submit(_run_bbc, verbose=verbose)
             f_ap = ex.submit(_run_ap, verbose=verbose)
             f_cna = ex.submit(_run_cna, verbose=verbose)
-            market = f_market.result()
+            if f_market is not None:
+                market = f_market.result()
             npr_stats = f_npr.result()
             bbc_stats = f_bbc.result()
             ap_stats = f_ap.result()
@@ -116,7 +136,18 @@ def main() -> int:
         ap_news._print_summary(ap_stats)
         cna_news._print_summary(cna_stats)
 
-    market_ok = not market.failed
+    sentiment_stats = None
+    sentiment_ok = True
+    if args.with_sentiment:
+        from stratlab.news import sentiment as sentiment_mod
+        _print_step_header("Sentiment scoring (FinBERT)")
+        sentiment_stats = sentiment_mod.score_news_dir(
+            since=window_start, verbose=verbose,
+        )
+        sentiment_mod._print_summary(sentiment_stats)
+        sentiment_ok = sentiment_stats.errors == 0
+
+    market_ok = market is None or not market.failed
     npr_ok = npr_stats.errors == 0
     bbc_ok = bbc_stats.errors == 0
     ap_ok = ap_stats.errors == 0
@@ -130,8 +161,9 @@ def main() -> int:
     print()
     print("=" * 60)
     print(f"Daily refresh complete in {elapsed:.0f}s")
-    print(f"  market: {'ok' if market_ok else 'FAILURES'} "
-          f"({len(market.failed)} failed tickers, {market.new_bars:,} new bars)")
+    if market is not None:
+        print(f"  market: {'ok' if market_ok else 'FAILURES'} "
+              f"({len(market.failed)} failed tickers, {market.new_bars:,} new bars)")
     print(f"  npr:    {'ok' if npr_ok else 'FAILURES'} "
           f"({npr_stats.errors} errors, {npr_stats.fetched_articles} articles)")
     print(f"  bbc:    {'ok' if bbc_ok else 'FAILURES'} "
@@ -141,9 +173,13 @@ def main() -> int:
     print(f"  cna:    {'ok' if cna_ok else 'FAILURES'} "
           f"({cna_stats.errors} errors, {cna_stats.fetched_articles} articles)")
     print(f"  total news articles fetched: {total_articles}")
+    if sentiment_stats is not None:
+        print(f"  sentiment: {'ok' if sentiment_ok else 'FAILURES'} "
+              f"({sentiment_stats.errors} errors, "
+              f"{sentiment_stats.articles_scored} scored)")
     print("=" * 60)
 
-    return 0 if all([market_ok, npr_ok, bbc_ok, ap_ok, cna_ok]) else 1
+    return 0 if all([market_ok, npr_ok, bbc_ok, ap_ok, cna_ok, sentiment_ok]) else 1
 
 
 if __name__ == "__main__":

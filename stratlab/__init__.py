@@ -4,6 +4,9 @@ from stratlab.engine.context import BarContext
 from stratlab.strategies.base import Strategy
 from stratlab.analytics.metrics import compute_metrics
 from stratlab.data.provider import load_bars
+from stratlab.evaluation import walk_forward, compare_to_benchmark
+from stratlab.analytics.tearsheet import tearsheet
+from stratlab.news.features import daily_sentiment
 from stratlab.data.universe import (
     all_futures,
     all_indices,
@@ -31,6 +34,10 @@ __all__ = [
     "Order",
     "OrderSide",
     "Strategy",
+    "compare_to_benchmark",
+    "daily_sentiment",
+    "tearsheet",
+    "walk_forward",
     "all_futures",
     "all_indices",
     "commodity_futures",
