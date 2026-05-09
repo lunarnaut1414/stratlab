@@ -74,6 +74,10 @@ python -m stratlab.news.npr --workers 4
 
 # Quiet mode (only summary, no per-day logging)
 python -m stratlab.news.npr --quiet
+
+# BBC historical backfill via sitemap (covers ~2009 → today; --years scopes depth)
+python -m stratlab.news.bbc --from-sitemap --years 1 --workers 4
+python -m stratlab.news.bbc --from-sitemap --since 2024-01-01 --workers 4
 ```
 
 News storage is one JSON per `(source, topic, day)`:
