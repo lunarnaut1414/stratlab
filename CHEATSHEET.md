@@ -461,29 +461,26 @@ profit_factor, turnover_annualized, borrow_cost, dropped_orders.
 
 ## Tests
 
-The engine has a deterministic test suite covering its core invariants —
-no live data, no API calls, runs in <1s. If anything below fails, every
-backtest result is suspect.
+49 deterministic tests on synthetic data — no yfinance, no FinBERT, no
+HTTP. Whole suite runs in <0.5s.
 
 ```bash
 pip install -e ".[dev]"
 pytest tests/ -v
 ```
 
-What's covered:
+| File | What it locks in |
+|---|---|
+| `test_engine.py` | next-bar fill, no look-ahead, cash conservation, short PnL sign, commission/slippage direction, cross-sectional alignment, returns ≡ equity.pct_change() |
+| `test_trades.py` | round-trip pairing, long↔short flips, partial closes, pyramiding avg-entry, multi-symbol independence, profit-factor edge cases |
+| `test_evaluation.py` | walk_forward windowing, raises on too-short data, compare_to_benchmark deltas, no-overlap detection |
+| `test_metrics.py` | flat-equity zeros, total-return diff, max-drawdown trough, Sharpe sign, Calmar = \|CAGR/MaxDD\| |
+| `test_news_features.py` | daily_sentiment mean across articles, skips unscored, source/topic/date filters, breakdown columns |
+| `test_storage.py` | save/load round-trip, atomic rename (no `.tmp` leftover), corrupt-JSON tolerance, self-describing filenames |
+| `test_indicators.py` | facade exposes documented primitives, RSI ∈ [0, 100], BB upper ≥ middle ≥ lower, all return aligned Series |
 
-- **No-trade preserves cash** — strategy that returns `[]` ⇒ flat equity curve at `initial_cash`
-- **Next-bar fill** — order placed on bar `i` fills at bar `i+1`'s open
-- **Final-bar orders dropped** — orders submitted on the last bar can't teleport-fill
-- **Round-trip PnL** — buy at price A, sell at price B ⇒ `gross_pnl == (B - A) * size`
-- **Short-side accounting** — sell-first opens a short with correct PnL sign
-- **Commission per fill** — `commission_pct` deducted from notional on every fill
-- **Slippage direction** — buys fill above the open, sells below
-- **Cross-sectional alignment** — assets with non-overlapping date ranges align on the union, no NaN crashes
-- **Buy-and-hold tracks price** — final equity matches initial cash + price drift
-- **Returns ≡ equity.pct_change()** — the two series stay consistent
-
-When you change anything in `stratlab/engine/`, run pytest first.
+When you change anything in `stratlab/engine/`, `analytics/`, or
+`evaluation.py`, run `pytest` first.
 
 ---
 
