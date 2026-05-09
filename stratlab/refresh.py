@@ -441,6 +441,9 @@ def _batch_fetch_and_merge(
     return new_bars_total
 
 
+_PERIOD_MAX_FALLBACK_START = "2000-01-01"
+
+
 def _fetch_one_ticker(
     symbol: str,
     start: str | None,
@@ -456,26 +459,36 @@ def _fetch_one_ticker(
     multi-ticker truncation. Returns ``(bars_added, success)``.
 
     When ``start`` is None, uses ``period="max"`` for the ticker's full
-    available history.
+    available history. Some recently-launched products (Micro Ether
+    futures, etc.) reject ``period="max"`` because Yahoo thinks they have
+    too little history; in that case we transparently fall back to an
+    explicit ``start`` date and yfinance returns whatever exists.
     """
+    raw = _try_fetch(symbol, start, end, interval)
+    if raw is None or raw.empty:
+        if start is None:
+            # period="max" wasn't accepted; retry with an explicit start.
+            raw = _try_fetch(symbol, _PERIOD_MAX_FALLBACK_START, end, interval)
+        if raw is None or raw.empty:
+            return 0, False
+    try:
+        added = _merge_one(symbol, raw, cached_by_sym.get(symbol), interval, summary)
+        return added, True
+    except Exception:
+        return 0, False
+
+
+def _try_fetch(symbol: str, start: str | None, end: str, interval: str) -> pd.DataFrame | None:
     history_kwargs = dict(interval=interval, auto_adjust=True)
     if start is None:
         history_kwargs["period"] = "max"
     else:
         history_kwargs["start"] = start
         history_kwargs["end"] = end
-
     try:
-        raw = yf.Ticker(symbol).history(**history_kwargs)
+        return yf.Ticker(symbol).history(**history_kwargs)
     except Exception:
-        return 0, False
-    if raw.empty:
-        return 0, False
-    try:
-        added = _merge_one(symbol, raw, cached_by_sym.get(symbol), interval, summary)
-        return added, True
-    except Exception:
-        return 0, False
+        return None
 
 
 def _fetch_chunk(
