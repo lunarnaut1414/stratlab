@@ -177,7 +177,24 @@ metrics dict. Held positions are marked-to-market at each bar's close.
 
 ## Data
 
-Market data is fetched via yfinance and cached as CSV files in `~/.stratlab/cache/`. Pass `use_cache=False` to `load_bars()` to force a fresh download.
+Market data is fetched via yfinance and cached as CSV files in
+`~/.stratlab/cache/` (one file per `(symbol, interval)`, holding every bar
+ever fetched). Pass `use_cache=False` to `load_bars()` to force a fresh
+download.
+
+### Refresh the local cache
+
+```bash
+python -m stratlab.refresh                       # full default universe (~780 tickers)
+python -m stratlab.refresh --tickers AAPL MSFT   # specific tickers
+python -m stratlab.refresh --start 2015-01-01    # backfill more history
+```
+
+The refresh module fetches incrementally: tickers with no cache get the full
+range from `--start` to today, tickers with existing cache get only the gap
+appended. Tickers whose cache already covers the most recent business day are
+skipped without a network call. Final summary reports cold/warm/up-to-date
+counts, new bars added, and total cache size.
 
 ## For AI Agents
 
