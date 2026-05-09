@@ -438,15 +438,39 @@ for article_id, art in list(articles.items())[:3]:
 
 ---
 
-## Engine knobs
+## Execution model
+
+**Same-bar limit-intraday.** On each bar `i`:
+
+1. `on_bar(ctx)` runs *before* bar `i` is observed. `ctx.history()`,
+   `ctx.closes()`, `ctx.closes_window()` return data through bar
+   `i-1` (yesterday and earlier) — no way to read today's open / high
+   / low / close from inside the strategy.
+2. Each returned `Order` is checked against bar `i`'s OHLC range:
+
+   | Order | Fills when | Fill price |
+   |---|---|---|
+   | `Order(BUY, size)` (market) | always | bar `i`'s open × (1 + slippage_pct) |
+   | `Order(SELL, size)` (market) | always | bar `i`'s open × (1 − slippage_pct) |
+   | `Order(BUY, size, limit_price=L)` | `bar.low ≤ L` | `min(L, bar.open)` (gap-down → better) |
+   | `Order(SELL, size, limit_price=L)` | `bar.high ≥ L` | `max(L, bar.open)` (gap-up → better) |
+
+   Limit orders **don't get slippage** — you specified the price. If a
+   limit's range condition isn't met, the order is dropped (counted in
+   `metrics["dropped_orders"]`).
+3. Equity[i] is marked to bar `i`'s close.
+
+A strategy that submits a paired BUY-limit + SELL-limit on the same
+bar can produce a **same-bar round-trip** if today's range crosses
+both limits. See `MeanReversion` for an example using limits.
 
 ```python
 Backtest(
     data=...,
     strategy=...,
     initial_cash=100_000,
-    commission_pct=0.001,           # 10 bps per trade
-    slippage_pct=0.0005,             # 5 bps per side
+    commission_pct=0.001,           # 10 bps per fill (both market and limit)
+    slippage_pct=0.0005,             # 5 bps per side, MARKET orders only
     allow_short=True,                # signed-size positions
     borrow_rate_annual=0.005,        # 50 bps/yr on absolute short notional
 ).run()
@@ -461,8 +485,8 @@ profit_factor, turnover_annualized, borrow_cost, dropped_orders.
 
 ## Tests
 
-49 deterministic tests on synthetic data — no yfinance, no FinBERT, no
-HTTP. Whole suite runs in <0.5s.
+57 deterministic tests on synthetic data — no yfinance, no FinBERT, no
+HTTP. Whole suite runs in <1s.
 
 ```bash
 pip install -e ".[dev]"
@@ -471,7 +495,8 @@ pytest tests/ -v
 
 | File | What it locks in |
 |---|---|
-| `test_engine.py` | next-bar fill, no look-ahead, cash conservation, short PnL sign, commission/slippage direction, cross-sectional alignment, returns ≡ equity.pct_change() |
+| `test_engine.py` | same-bar fill at open, no look-ahead (`history()` excludes today), cash conservation, short PnL sign, commission/slippage direction, cross-sectional alignment, returns ≡ equity.pct_change() |
+| `test_limit_orders.py` | limit fills only when range crosses limit, gap-down/gap-up better-fill, no slippage on limit fills, paired same-bar round-trip |
 | `test_trades.py` | round-trip pairing, long↔short flips, partial closes, pyramiding avg-entry, multi-symbol independence, profit-factor edge cases |
 | `test_evaluation.py` | walk_forward windowing, raises on too-short data, compare_to_benchmark deltas, no-overlap detection |
 | `test_metrics.py` | flat-equity zeros, total-return diff, max-drawdown trough, Sharpe sign, Calmar = \|CAGR/MaxDD\| |

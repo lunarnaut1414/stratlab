@@ -19,7 +19,9 @@ class SMACrossover(Strategy):
         self.in_position = False
 
     def on_bar(self, ctx: BarContext) -> list[Order]:
-        if ctx.idx < self.slow:
+        # history() returns bars before today, so we need slow+1 of them
+        # to compute both the latest SMA and the prior-bar SMA for crossover.
+        if ctx.idx < self.slow + 1:
             return []
 
         closes = ctx.history()["close"]

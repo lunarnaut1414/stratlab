@@ -2,15 +2,16 @@
 
 The original "Turtle" strategy boiled down to its essentials:
 
-- Enter long when today's close breaks above the highest high of the
-  prior ``entry_window`` bars.
-- Exit when today's close breaks below the lowest low of the prior
+- Enter long when yesterday's close breaks above the highest high of
+  the prior ``entry_window`` bars (excluding yesterday).
+- Exit when yesterday's close breaks below the lowest low of the prior
   ``exit_window`` bars (typically shorter than entry_window — let
   winners run, cut losers fast).
 
-Single-asset. Works on anything trending — futures, indices, individual
-names with strong directional moves. Needs ``entry_window`` bars of
-warmup before any signals fire.
+The decision uses yesterday's close (the latest observable bar under
+the engine's restricted-view discipline) and the order fills at today's
+open. Single-asset. Works on anything trending — futures, indices,
+individual names with strong directional moves.
 """
 from __future__ import annotations
 
@@ -35,12 +36,14 @@ class DonchianBreakout(Strategy):
         self.in_position = False
 
     def on_bar(self, ctx: BarContext) -> list[Order]:
-        if ctx.idx < self.entry_window:
+        # history() returns bars before today, so we need entry_window+1 of them
+        # to compare yesterday's close against the prior entry_window bars' high.
+        if ctx.idx < self.entry_window + 1:
             return []
 
         bars = ctx.history()
         close = bars["close"].iloc[-1]
-        # Use prior bars (exclude today) so the breakout level isn't dragged by today's move.
+        # Use bars before yesterday so the breakout level isn't dragged by yesterday's move.
         upper = bars["high"].iloc[-self.entry_window - 1 : -1].max()
         lower = bars["low"].iloc[-self.exit_window - 1 : -1].min()
 

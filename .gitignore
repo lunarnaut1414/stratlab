@@ -11,3 +11,6 @@ build/
 # `python -m stratlab.refresh` and `python -m stratlab.news.npr`.
 data/market/
 data/news/
+
+# Scratch directory for tearsheets, ad-hoc demo scripts, etc.
+tmp/

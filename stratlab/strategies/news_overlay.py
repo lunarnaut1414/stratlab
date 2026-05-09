@@ -61,9 +61,15 @@ class NewsOverlay(Strategy):
         self.allow_short = allow_short
         self.position_state = 0  # +1 long, -1 short, 0 flat
 
-    def _sentiment_for(self, ts: pd.Timestamp) -> float:
-        key = ts.normalize()
-        v = self.sentiment.get(key, 0.0)
+    def _sentiment_as_of(self, ts: pd.Timestamp) -> float:
+        """Most recent sentiment value strictly before ``ts`` — i.e., the
+        last published-day's score we could have observed before today's
+        bar opens. Avoids leaking today's news into today's decision."""
+        cutoff = ts.normalize()
+        prior = self.sentiment.loc[self.sentiment.index < cutoff]
+        if prior.empty:
+            return 0.0
+        v = prior.iloc[-1]
         try:
             return float(v) if pd.notna(v) else 0.0
         except (TypeError, ValueError):
@@ -77,7 +83,7 @@ class NewsOverlay(Strategy):
         sma = closes.iloc[-self.momentum_window:].mean()
         price = closes.iloc[-1]
         momentum_up = price > sma
-        sent = self._sentiment_for(ctx.timestamp)
+        sent = self._sentiment_as_of(ctx.timestamp)
 
         bullish = momentum_up and sent > self.sentiment_threshold
         bearish = (not momentum_up) and sent < -self.sentiment_threshold

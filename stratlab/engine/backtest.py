@@ -34,10 +34,21 @@ class Backtest:
     skipped. Held positions are marked-to-market at the last known close, so
     delisting doesn't vanish a position from the equity curve.
 
-    Execution timing: orders submitted by ``on_bar`` on bar ``i`` are filled at
-    bar ``i+1``'s open (with slippage). This prevents the look-ahead bias of
-    deciding on a close and filling at that same close. Orders submitted on the
-    final bar are dropped — surfaced as ``dropped_orders`` in the metrics dict.
+    Execution timing: ``on_bar`` runs *before* bar ``i`` is observed —
+    ``ctx.history()`` returns bars [0, i) (yesterday and earlier). Orders
+    returned by ``on_bar`` are checked against bar ``i``'s OHLC range:
+
+    - Market orders (``limit_price=None``) fill at bar ``i``'s open with
+      slippage applied (buys pay slightly more, sells receive slightly less).
+    - Limit orders fill only if the bar's range crosses the limit:
+      buys when ``low <= limit_price``, sells when ``high >= limit_price``.
+      A gap below a buy limit (or above a sell limit) gives the better gap
+      price. No slippage on limit fills.
+
+    This eliminates look-ahead structurally — there's no way for the strategy
+    to read today's close, high, or low when deciding. A paired BUY-limit
+    and SELL-limit on the same bar can produce a same-bar round-trip when
+    today's range crosses both.
     """
 
     data: dict[str, pd.DataFrame]
@@ -80,7 +91,6 @@ class Backtest:
         n_bars = len(common_index)
         equity = np.zeros(n_bars)
         last_close: dict[str, float] = {sym: 0.0 for sym in aligned}
-        pending: list = []
         dropped_orders = 0
         total_borrow_cost = 0.0
         prev_ts: pd.Timestamp | None = None
@@ -89,31 +99,18 @@ class Backtest:
 
         for i in range(n_bars):
             bar_closes = closes_df.iloc[i]
-            tradeable_mask = bar_closes.notna()
-            tradeable = bar_closes.index[tradeable_mask].tolist()
+            tradeable = bar_closes.index[bar_closes.notna()].tolist()
 
-            # Fill orders submitted on the previous bar at THIS bar's open.
-            for order in pending:
-                if order.symbol not in aligned:
-                    dropped_orders += 1
-                    continue
-                bar = aligned[order.symbol].iloc[i]
-                if pd.isna(bar.get("open")):
-                    dropped_orders += 1
-                    continue
-                self.broker.fill_order(order, bar, common_index[i], price_col="open")
-            pending = []
-
-            for sym in tradeable:
-                last_close[sym] = float(bar_closes[sym])
-
-            # Accrue borrow cost on short positions for the calendar gap since
-            # the previous bar (so weekends/holidays accrue correctly).
+            # Borrow accrual covers the calendar gap from the prior bar to this
+            # bar's open, before today's fills happen.
             if prev_ts is not None and self.broker.borrow_rate_annual != 0.0:
                 days = (common_index[i] - prev_ts).days
                 total_borrow_cost += self.broker.accrue_borrow(last_close, days=days)
             prev_ts = common_index[i]
 
+            # Strategy decides BEFORE today's bar is observed. ``history()``
+            # returns bars [0, i) — yesterday and earlier. ``ctx.idx == i``
+            # still names today (the bar where any orders will execute).
             ctx = BarContext(
                 idx=i,
                 timestamp=common_index[i],
@@ -122,9 +119,9 @@ class Backtest:
                 _closes_df=closes_df,
                 _broker=self.broker,
             )
-
             orders = self.strategy.on_bar(ctx)
 
+            # Try to fill each order against today's OHLC range.
             for order in orders:
                 if not order.symbol:
                     if not tradeable:
@@ -134,12 +131,15 @@ class Backtest:
                 if order.symbol not in aligned:
                     dropped_orders += 1
                     continue
-                pending.append(order)
+                bar = aligned[order.symbol].iloc[i]
+                fill = self.broker.fill_order(order, bar, common_index[i])
+                if fill is None:
+                    dropped_orders += 1
 
+            # Now that fills (if any) have updated positions, mark to today's close.
+            for sym in tradeable:
+                last_close[sym] = float(bar_closes[sym])
             equity[i] = self.broker.portfolio_value(last_close)
-
-        # Orders queued on the final bar can never fill — count and drop.
-        dropped_orders += len(pending)
 
         self.strategy.on_end()
 

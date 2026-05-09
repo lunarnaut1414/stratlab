@@ -13,9 +13,31 @@ class OrderSide(Enum):
 
 @dataclass
 class Order:
+    """A trading order.
+
+    ``limit_price`` controls execution semantics:
+
+    - ``None`` (default): market order. Fills unconditionally at the
+      current bar's open, with slippage applied (buys pay slightly more,
+      sells receive slightly less).
+    - Set to a float: limit order. Fills only if the current bar's
+      OHLC range crosses the limit:
+        - BUY:  fills when ``low <= limit_price``; fill price is
+          ``min(limit_price, open)`` so a gap-down gives the better
+          gap price (price improvement).
+        - SELL: fills when ``high >= limit_price``; fill price is
+          ``max(limit_price, open)`` so a gap-up gives the better
+          gap price.
+      Slippage is **not** applied to limit fills — the price you
+      asked for is what you got.
+
+    If a limit order's range condition isn't met, the order is dropped
+    (counted in ``metrics["dropped_orders"]``).
+    """
     side: OrderSide
     size: float
     symbol: str = ""
+    limit_price: float | None = None
 
 
 @dataclass
@@ -83,10 +105,47 @@ class Broker:
         order: Order,
         bar: pd.Series,
         timestamp: pd.Timestamp,
-        price_col: str = "close",
     ) -> Fill | None:
-        raw = float(bar[price_col])
-        price = raw * (1 + self.slippage_pct) if order.side == OrderSide.BUY else raw * (1 - self.slippage_pct)
+        """Try to fill ``order`` against ``bar`` (the current bar's OHLC).
+
+        Returns the resulting :class:`Fill` if the order executed, or
+        ``None`` if it didn't (limit not crossed, would push past the
+        ``allow_short`` rule, or any required price column is NaN).
+
+        Market orders fill at ``bar.open`` with slippage. Limit orders
+        fill only if ``bar``'s low/high range crosses the limit and use
+        the limit price (with gap protection — see :class:`Order`).
+        """
+        open_raw = bar.get("open")
+        if pd.isna(open_raw):
+            return None
+        open_raw = float(open_raw)
+
+        if order.limit_price is None:
+            # Market order: fill at open with slippage.
+            if order.side == OrderSide.BUY:
+                price = open_raw * (1 + self.slippage_pct)
+            else:
+                price = open_raw * (1 - self.slippage_pct)
+        else:
+            # Limit order: needs the high/low range to cross the limit.
+            low_raw = bar.get("low")
+            high_raw = bar.get("high")
+            if pd.isna(low_raw) or pd.isna(high_raw):
+                return None
+            low = float(low_raw)
+            high = float(high_raw)
+            limit = float(order.limit_price)
+            if order.side == OrderSide.BUY:
+                if low > limit:
+                    return None  # market never traded down to the limit
+                # Gap protection: if the bar opened below our buy limit,
+                # we get the better open price, not the limit price.
+                price = min(limit, open_raw)
+            else:
+                if high < limit:
+                    return None  # market never traded up to the limit
+                price = max(limit, open_raw)
 
         signed = order.size if order.side == OrderSide.BUY else -order.size
         notional = abs(signed) * price

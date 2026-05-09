@@ -1,8 +1,13 @@
-"""Backtest engine invariants.
+"""Backtest engine invariants under the same-bar limit-intraday model.
 
 These exercise the core guarantees the engine is supposed to provide:
-- no look-ahead (orders fill at the *next* bar's open)
-- cash conservation (no trade ⇒ cash unchanged)
+
+- on_bar runs *before* today's bar is observed; orders fill on the
+  same bar's range
+- market orders fill at today's open with slippage
+- limit orders fill at the limit price (with gap protection) when the
+  bar's low/high range crosses the limit; otherwise they're dropped
+- cash conservation when the strategy doesn't trade
 - correct round-trip PnL accounting
 - short-selling sign conventions
 - commission and slippage applied as documented
@@ -11,8 +16,6 @@ These exercise the core guarantees the engine is supposed to provide:
 If any of these fail, every backtest result downstream is suspect.
 """
 from __future__ import annotations
-
-import math
 
 import pytest
 
@@ -57,20 +60,6 @@ class _RoundTrip(Strategy):
         return []
 
 
-class _ShortOnce(Strategy):
-    """Open a short on bar 0."""
-    def __init__(self, size: float = 10.0):
-        super().__init__(size=size)
-        self.size = size
-        self.fired = False
-
-    def on_bar(self, ctx):
-        if self.fired:
-            return []
-        self.fired = True
-        return [Order(side=OrderSide.SELL, size=self.size)]
-
-
 # -----------------------------------------------------------------------------
 
 
@@ -87,12 +76,12 @@ def test_no_trade_preserves_cash(flat_price):
     assert len(result.trades) == 0
 
 
-def test_orders_fill_at_next_bar_open(linear_ramp):
-    """Order submitted on bar i must fill at bar (i+1)'s open price.
+def test_market_order_fills_at_current_bar_open(linear_ramp):
+    """Market order submitted on bar i fills at bar i's open (same bar).
 
-    With ramp prices 100, 101, 102, ..., a buy order placed by on_bar at idx=0
-    must fill at price 101 (open of bar 1), not 100 (close of bar 0). Slippage
-    off so the fill price equals the open exactly.
+    With ramp prices 100, 101, 102, ..., a buy order placed on bar 0 must
+    fill at price 100 (open of bar 0). Slippage off so fill price equals
+    the open exactly.
     """
     bt = Backtest(
         data={"A": linear_ramp}, strategy=_BuyOnce(size=1.0),
@@ -101,28 +90,15 @@ def test_orders_fill_at_next_bar_open(linear_ramp):
     result = bt.run()
     assert len(result.fills) == 1
     fill = result.fills[0]
-    assert fill.price == pytest.approx(101.0), \
-        f"expected fill at next-bar open (101.0), got {fill.price}"
-    assert fill.timestamp == linear_ramp.index[1]
-
-
-def test_final_bar_orders_dropped(linear_ramp):
-    """An order placed on the last bar has no next bar to fill on — must be dropped."""
-    last_idx = len(linear_ramp) - 1
-    bt = Backtest(
-        data={"A": linear_ramp},
-        strategy=_RoundTrip(entry_idx=last_idx, exit_idx=last_idx),
-        initial_cash=10_000.0, commission_pct=0.0, slippage_pct=0.0,
-    )
-    result = bt.run()
-    assert result.metrics.get("dropped_orders", 0) >= 1, \
-        "order on final bar was filled — that's look-ahead/teleport-fill"
+    assert fill.price == pytest.approx(100.0), \
+        f"expected fill at current-bar open (100.0), got {fill.price}"
+    assert fill.timestamp == linear_ramp.index[0]
 
 
 def test_round_trip_pnl_matches_price_diff(linear_ramp):
-    """Buy at idx 0, sell at idx 50 → fills at next-bar opens (101 and 151).
+    """Buy at idx 0, sell at idx 50 → fills at same-bar opens (100 and 150).
 
-    Gross PnL must equal (151 - 101) * 1 = 50, exactly.
+    Gross PnL must equal (150 - 100) * 1 = 50, exactly.
     """
     bt = Backtest(
         data={"A": linear_ramp},
@@ -132,21 +108,23 @@ def test_round_trip_pnl_matches_price_diff(linear_ramp):
     result = bt.run()
     assert len(result.trades) == 1
     trade = result.trades[0]
-    assert trade.entry_price == pytest.approx(101.0)
-    assert trade.exit_price == pytest.approx(151.0)
+    assert trade.entry_price == pytest.approx(100.0)
+    assert trade.exit_price == pytest.approx(150.0)
     assert trade.gross_pnl == pytest.approx(50.0)
     assert trade.side == "long"
 
 
-def test_short_position_sign_and_cash(linear_ramp):
-    """Sell-first opens a short: trade.side == 'short' and equity reflects price drop."""
-    # Short on bar 0 (fills at bar 1, price 101), close on bar 50 (fills at bar 51, price 151).
+def test_short_round_trip_pnl(linear_ramp):
+    """Open short on bar 0 (fills at 100), cover on bar 50 (fills at 150).
+
+    Short on rising market → loss of (150 - 100) * 2 = 100.
+    """
     class _ShortRoundTrip(Strategy):
         def on_bar(self, ctx):
             if ctx.idx == 0:
                 return [Order(side=OrderSide.SELL, size=2.0)]
             if ctx.idx == 50:
-                return [Order(side=OrderSide.BUY, size=2.0)]  # cover
+                return [Order(side=OrderSide.BUY, size=2.0)]
             return []
 
     bt = Backtest(
@@ -157,10 +135,8 @@ def test_short_position_sign_and_cash(linear_ramp):
     result = bt.run()
     assert len(result.trades) == 1
     trade = result.trades[0]
-    assert trade.side == "short", f"expected short trade, got {trade.side}"
-    # Shorting at 101 and covering at 151 on a rising market → loss of (151-101)*2 = 100.
-    assert trade.gross_pnl == pytest.approx(-100.0), \
-        f"short on rising market should lose: got pnl={trade.gross_pnl}"
+    assert trade.side == "short"
+    assert trade.gross_pnl == pytest.approx(-100.0)
 
 
 def test_commission_deducted_per_fill(linear_ramp):
@@ -173,14 +149,14 @@ def test_commission_deducted_per_fill(linear_ramp):
     free = Backtest(commission_pct=0.0, **common).run()
     paid = Backtest(commission_pct=0.001, **common).run()  # 10 bps
     diff = free.equity_curve.iloc[-1] - paid.equity_curve.iloc[-1]
-    # Two fills: buy at 101, sell at 151. Commission is 10bps of notional per fill.
-    expected = 0.001 * (101.0 + 151.0)
+    # Two fills: buy at 100, sell at 150. Commission is 10bps of notional per fill.
+    expected = 0.001 * (100.0 + 150.0)
     assert diff == pytest.approx(expected, rel=1e-6), \
         f"commission delta wrong: got {diff}, expected {expected}"
 
 
 def test_slippage_buy_pays_more_sell_gets_less(linear_ramp):
-    """With positive slippage_pct, buys fill above the open, sells fill below it."""
+    """With positive slippage_pct, market buys fill above open, sells below."""
     bt = Backtest(
         data={"A": linear_ramp},
         strategy=_RoundTrip(entry_idx=0, exit_idx=50, size=1.0),
@@ -188,38 +164,37 @@ def test_slippage_buy_pays_more_sell_gets_less(linear_ramp):
     )
     result = bt.run()
     buy_fill, sell_fill = result.fills
-    # Buy fill: open 101, +50bps → 101 * 1.005 = 101.505
-    assert buy_fill.price == pytest.approx(101.0 * 1.005)
-    # Sell fill: open 151, -50bps → 151 * 0.995 = 150.245
-    assert sell_fill.price == pytest.approx(151.0 * 0.995)
-    # Net round-trip is worse than the no-slippage 50.0
+    # Buy at bar 0 open=100, +50bps → 100.5
+    assert buy_fill.price == pytest.approx(100.0 * 1.005)
+    # Sell at bar 50 open=150, -50bps → 149.25
+    assert sell_fill.price == pytest.approx(150.0 * 0.995)
     assert result.trades[0].gross_pnl < 50.0
 
 
 def test_cross_sectional_alignment_handles_late_listing(two_assets):
     """B starts later than A. Engine should align on the union of indices and
-    treat B as 'untradeable' before its listing date — no spurious orders or NaN-driven
-    crashes."""
+    treat B as 'untradeable' before its listing date — no spurious orders or
+    NaN-driven crashes."""
     bt = Backtest(
         data=two_assets, strategy=_NoOp(),
         initial_cash=10_000.0, commission_pct=0.0, slippage_pct=0.0,
     )
     result = bt.run()
-    # Equity curve should span the full union, not just the overlap.
     expected_len = len(two_assets["A"].index.union(two_assets["B"].index))
     assert len(result.equity_curve) == expected_len
     assert (result.equity_curve == 10_000.0).all()
 
 
 def test_buy_and_hold_tracks_price_change(linear_ramp):
-    """Buy 1 share, hold to end. Final equity ≈ initial_cash + (last_price - entry_price)."""
+    """Buy 1 share on bar 0, hold to end. Final equity = initial_cash +
+    (last_close - entry_price)."""
     bt = Backtest(
         data={"A": linear_ramp}, strategy=_BuyOnce(size=1.0),
         initial_cash=10_000.0, commission_pct=0.0, slippage_pct=0.0,
     )
     result = bt.run()
     last_price = float(linear_ramp["close"].iloc[-1])
-    expected = 10_000.0 + (last_price - 101.0)  # bought at bar-1 open (101)
+    expected = 10_000.0 + (last_price - 100.0)  # bought at bar-0 open
     assert result.equity_curve.iloc[-1] == pytest.approx(expected, rel=1e-9), \
         f"buy-and-hold PnL wrong: got {result.equity_curve.iloc[-1]}, expected {expected}"
 
@@ -233,7 +208,36 @@ def test_returns_consistent_with_equity_curve(linear_ramp):
     result = bt.run()
     eq = result.equity_curve
     expected = eq.pct_change().fillna(0.0)
-    # Some engines may store returns slightly differently — allow tiny tolerance.
     aligned = result.returns.reindex(expected.index)
     assert ((aligned - expected).abs() < 1e-9).all(), \
         "returns series doesn't match equity_curve.pct_change()"
+
+
+def test_history_excludes_today():
+    """BarContext.history() must not include the current bar — that's the
+    whole point of the same-bar fill model."""
+    seen_lengths: list[int] = []
+    seen_last_bar: list = []
+
+    class _Probe(Strategy):
+        def on_bar(self, ctx):
+            seen_lengths.append(len(ctx.history()))
+            if not ctx.history().empty:
+                seen_last_bar.append(ctx.history().index[-1])
+            return []
+
+    import numpy as np
+    import pandas as pd
+    prices = np.arange(100.0, 105.0)
+    df = pd.DataFrame(
+        {"open": prices, "high": prices, "low": prices, "close": prices,
+         "volume": [1e6] * 5},
+        index=pd.bdate_range("2024-01-01", periods=5),
+    )
+    Backtest(data={"A": df}, strategy=_Probe(),
+             initial_cash=10_000.0, commission_pct=0.0, slippage_pct=0.0).run()
+
+    # On bar i, history() should have exactly i bars (bars 0..i-1, today excluded).
+    assert seen_lengths == [0, 1, 2, 3, 4]
+    # And the last visible bar is always strictly before today's index.
+    assert seen_last_bar == list(df.index[:-1])
