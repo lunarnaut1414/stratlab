@@ -8,5 +8,6 @@ build/
 .DS_Store
 
 # Local data lake — large, machine-specific, regeneratable via
-# `python -m stratlab.refresh`. Don't commit market data.
+# `python -m stratlab.refresh` and `python -m stratlab.news.npr`.
 data/market/
+data/news/

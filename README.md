@@ -226,10 +226,17 @@ than VXX/UVXY for vol-aware strategies.
 ### Refresh the local cache
 
 ```bash
-python -m stratlab.refresh                       # full default universe (~780 tickers)
+python -m stratlab.refresh                       # market data: ~850 tickers
 python -m stratlab.refresh --tickers AAPL MSFT   # specific tickers
 python -m stratlab.refresh --start 2020-01-01    # only fetch from 2020 onward
+
+python -m stratlab.news.npr                      # news: last 7 days, all topics
+python -m stratlab.news.npr --topics economy --start 2024-01-01 --end 2024-12-31
 ```
+
+News articles land in ``data/news/npr/<topic>/<year>.json``, keyed by article
+ID so re-runs skip what's already on disk. 8 topics: politics, economy,
+science, world, news, business, technology, culture.
 
 By default `--start` is `1900-01-01` so each ticker gets its full Yahoo history
 on a cold fetch (AAPL → 1980, NVDA → 1999, ABNB → 2020 IPO, etc.). Pass an
