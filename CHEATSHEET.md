@@ -64,10 +64,11 @@ python -m stratlab.news.npr --quiet
 ```
 
 News storage is one JSON per `(source, topic, day)`:
-`data/news/<source>/<topic>/<YYYY>/<YYYY-MM-DD>.json`. Resume is by file
-existence — if the day file exists (even empty), the scraper skips that day
-without an HTTP request. Legacy year-based files have been backed up to
-`data/news/_legacy_yearly_backup/`.
+`data/news/<source>/<topic>/<YYYY>/<source>-<topic>-<YYYY-MM-DD>.json`. The
+filename is self-describing so a single JSON copied or shared out of context
+is still unambiguous. Resume is by file existence — if the day file exists
+(even empty), the scraper skips that day without an HTTP request. Legacy
+year-based files have been backed up to `data/news/_legacy_yearly_backup/`.
 
 ---
 

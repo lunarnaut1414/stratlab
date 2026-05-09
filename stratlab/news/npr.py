@@ -39,6 +39,7 @@ from stratlab.news.storage import (
     day_exists,
     day_path,
     load_day,
+    migrate_filenames,
     save_day,
 )
 
@@ -185,9 +186,13 @@ def migrate_yearly_to_daily(verbose: bool = True) -> dict[str, int]:
     """Split legacy ``<topic>/<year>.json`` files into per-day files.
 
     Yearly originals are moved to ``data/news/_legacy_yearly_backup/npr/`` so
-    nothing is lost. Returns a dict with stats. Idempotent — once the yearly
-    files have moved, subsequent calls no-op.
+    nothing is lost. Also catches up the per-day filename format if needed
+    (legacy ``<YYYY-MM-DD>.json`` → ``npr-<topic>-<YYYY-MM-DD>.json``).
+    Idempotent — once everything is current, subsequent calls no-op.
     """
+    # Catch up filenames first so any subsequent operations see the new layout.
+    migrate_filenames(SOURCE, verbose=verbose)
+
     if not NPR_DIR.exists():
         return {"yearly_files": 0, "days_written": 0, "articles": 0}
 
