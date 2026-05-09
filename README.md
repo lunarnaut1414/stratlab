@@ -238,8 +238,9 @@ News articles land in ``data/news/npr/<topic>/<year>.json``, keyed by article
 ID so re-runs skip what's already on disk. 8 topics: politics, economy,
 science, world, news, business, technology, culture.
 
-By default `--start` is `1900-01-01` so each ticker gets its full Yahoo history
-on a cold fetch (AAPL → 1980, NVDA → 1999, ABNB → 2020 IPO, etc.). Pass an
+By default refresh uses yfinance's `period="max"` for cold fetches, so each
+ticker gets its full available history per its own inception (AAPL → 1980,
+NVDA → 1999, ABNB → 2020 IPO, ^GSPC → 1927, HPE → 2015 spinoff). Pass an
 explicit `--start` to truncate.
 
 The refresh module categorizes each ticker into one of four buckets and only

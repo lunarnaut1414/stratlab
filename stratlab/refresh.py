@@ -62,14 +62,10 @@ LEGACY_HOME_CACHE = Path.home() / ".stratlab" / "cache"
 # suffix, so anything matching this pattern is an orphan and can be deleted.
 _ORPHAN_CACHE_RE = re.compile(r"^.+_\w+_[0-9a-f]{16}\.csv$")
 
-# Yahoo's daily-granularity API rejects requests spanning more than 100 years.
-# Pin the "max history" floor at today minus ~99.5 years so we stay well inside
-# the limit. (The longest-running tickers — ^GSPC since 1927 — fit comfortably.)
-def _max_history_start() -> str:
-    return (date.today() - timedelta(days=int(365.25 * 99))).strftime("%Y-%m-%d")
-
-
-MAX_HISTORY_START = _max_history_start()
+# When --start is not specified, refresh asks yfinance for ``period="max"``,
+# which returns each ticker's full available history without forcing a global
+# floor (AAPL → 1980, NVDA → 1999, ABNB → 2020 IPO, ^GSPC → 1927). Pass an
+# explicit --start to truncate.
 
 # yf.download saturates the connection pool when given 800+ tickers at once
 # (DNS resolution failures, dropped responses). Chunk into manageable groups
@@ -278,18 +274,19 @@ def migrate_legacy_cache(verbose: bool = True) -> int:
 
 def refresh_universe(
     tickers: list[str] | None = None,
-    start: str = MAX_HISTORY_START,
+    start: str | None = None,
     end: str | None = None,
     interval: str = "1d",
     verbose: bool = True,
 ) -> RefreshSummary:
     """Bring every ticker in ``tickers`` up to date in the local cache.
 
-    Defaults to ``start=1900-01-01`` so each ticker gets its full Yahoo history
-    on a cold fetch (AAPL gets 1980→today, ABNB gets 2020→today, etc.). If
-    ``tickers`` is None, refreshes :func:`stratlab.default_universe`. The
-    summary returned reports which tickers were fetched cold, which were
-    incrementally extended, which were already up to date, and which failed.
+    With ``start=None`` (the default), cold fetches use yfinance's
+    ``period="max"`` mode, which returns each ticker's complete available
+    history (AAPL gets 1980→today, ABNB gets 2020→today, ^GSPC gets
+    1927→today). Pass an explicit ``start`` (e.g. ``"2020-01-01"``) to
+    truncate. The summary reports which tickers were fetched cold,
+    incrementally extended, already up to date, or failed.
     """
     if tickers is None:
         from stratlab import default_universe
@@ -297,7 +294,7 @@ def refresh_universe(
         tickers = default_universe()
 
     end = end or pd.Timestamp.now().strftime("%Y-%m-%d")
-    start_ts = pd.Timestamp(start)
+    start_ts = pd.Timestamp(start) if start is not None else None
     end_ts = pd.Timestamp(end)
     # Most recent business day on or before end_ts — avoids fruitless weekend
     # fetches when the cache already has Friday's bar.
@@ -332,7 +329,11 @@ def refresh_universe(
         if cached is None or cached.empty:
             full_fetch.append(sym)
             continue
-        needs_backfill = cached.index.min() > start_ts
+        # Only flag backfill when the user gave an explicit --start the cache
+        # doesn't cover. With start=None we trust whatever's already cached
+        # (the original cold fetch grabbed period="max" so it's already
+        # complete) and only do forward extends.
+        needs_backfill = start_ts is not None and cached.index.min() > start_ts
         needs_forward = cached.index.max() < last_bday
         if not needs_backfill and not needs_forward:
             summary.up_to_date.append(sym)
@@ -344,11 +345,12 @@ def refresh_universe(
     cold_count = sum(1 for s in full_fetch if cached_by_sym[s] is None)
     backfill_count = len(full_fetch) - cold_count
 
+    fetch_window = "max history" if start is None else f"from {start}"
     if verbose:
         print(f"Cache directory: {CACHE_DIR}")
         print(f"Universe: {len(tickers)} tickers")
         print(
-            f"  cold (no cache → fetch from {start})    : {cold_count}\n"
+            f"  cold (no cache → fetch {fetch_window})  : {cold_count}\n"
             f"  backfill (cache too short on the left)  : {backfill_count}\n"
             f"  warm (extend forward to {end})          : {len(forward_only)}\n"
             f"  already up to date                      : {len(summary.up_to_date)}"
@@ -356,7 +358,8 @@ def refresh_universe(
 
     if full_fetch:
         if verbose:
-            print(f"\nFetching {len(full_fetch)} cold/backfill tickers [{start} → {end}]...")
+            window = "max history" if start is None else f"{start} → {end}"
+            print(f"\nFetching {len(full_fetch)} cold/backfill tickers [{window}]...")
         added = _batch_fetch_and_merge(
             full_fetch, start, end, interval, cached_by_sym, summary, verbose=verbose
         )
@@ -383,7 +386,7 @@ def refresh_universe(
 
 def _batch_fetch_and_merge(
     tickers: list[str],
-    start: str,
+    start: str | None,
     end: str,
     interval: str,
     cached_by_sym: dict[str, pd.DataFrame | None],
@@ -440,7 +443,7 @@ def _batch_fetch_and_merge(
 
 def _fetch_one_ticker(
     symbol: str,
-    start: str,
+    start: str | None,
     end: str,
     interval: str,
     cached_by_sym: dict[str, pd.DataFrame | None],
@@ -451,11 +454,19 @@ def _fetch_one_ticker(
     yf.Ticker.history() is more reliable than yf.download for individual
     names — each call gets its own connection and response, with no
     multi-ticker truncation. Returns ``(bars_added, success)``.
+
+    When ``start`` is None, uses ``period="max"`` for the ticker's full
+    available history.
     """
+    history_kwargs = dict(interval=interval, auto_adjust=True)
+    if start is None:
+        history_kwargs["period"] = "max"
+    else:
+        history_kwargs["start"] = start
+        history_kwargs["end"] = end
+
     try:
-        raw = yf.Ticker(symbol).history(
-            start=start, end=end, interval=interval, auto_adjust=True
-        )
+        raw = yf.Ticker(symbol).history(**history_kwargs)
     except Exception:
         return 0, False
     if raw.empty:
@@ -469,24 +480,32 @@ def _fetch_one_ticker(
 
 def _fetch_chunk(
     tickers: list[str],
-    start: str,
+    start: str | None,
     end: str,
     interval: str,
     cached_by_sym: dict[str, pd.DataFrame | None],
     summary: RefreshSummary,
 ) -> tuple[int, list[str]]:
-    """Single yf.download for a chunk of tickers. Returns (bars_added, failed)."""
+    """Single yf.download for a chunk of tickers. Returns (bars_added, failed).
+
+    When ``start`` is None, asks for ``period="max"`` so each ticker gets its
+    full available history rather than truncated to a global floor.
+    """
+    download_kwargs = dict(
+        interval=interval,
+        auto_adjust=True,
+        group_by="ticker",
+        progress=False,
+        threads=True,
+    )
+    if start is None:
+        download_kwargs["period"] = "max"
+    else:
+        download_kwargs["start"] = start
+        download_kwargs["end"] = end
+
     try:
-        raw = yf.download(
-            tickers,
-            start=start,
-            end=end,
-            interval=interval,
-            auto_adjust=True,
-            group_by="ticker",
-            progress=False,
-            threads=True,
-        )
+        raw = yf.download(tickers, **download_kwargs)
     except Exception:
         return 0, list(tickers)
 
@@ -585,10 +604,11 @@ def main() -> int:
     )
     parser.add_argument(
         "--start",
-        default=MAX_HISTORY_START,
+        default=None,
         help=(
-            "Earliest date to fetch for tickers with no cache (default: "
-            f"{MAX_HISTORY_START}, i.e. max available history per ticker)."
+            "Earliest date to fetch for tickers with no cache. Default: "
+            "unspecified (yfinance period='max', i.e. each ticker's full "
+            "available history)."
         ),
     )
     parser.add_argument(

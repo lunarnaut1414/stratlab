@@ -46,7 +46,8 @@ python -m stratlab.news.npr                   # news only
 python -m stratlab.refresh --tickers AAPL MSFT GOOGL
 python -m stratlab.refresh --tickers '^VIX' '^VVIX' 'CL=F' 'GC=F'
 
-# Truncate history (default is full 1900→today, max available per ticker)
+# Truncate history (default is yfinance period="max" — each ticker's full
+# inception-to-today range, varies per ticker)
 python -m stratlab.refresh --start 2010-01-01
 
 # News for a specific date range / topic
