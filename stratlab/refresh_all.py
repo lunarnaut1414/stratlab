@@ -6,14 +6,22 @@ Equivalent to running these in sequence::
     python -m stratlab.news.npr
     python -m stratlab.news.bbc
     python -m stratlab.news.ap
+    python -m stratlab.news.kyodo
 
-By default the four pipelines run *in parallel* — they hit different
-domains (Yahoo, NPR, BBC, AP) so they don't compete on rate-limits.
-Wall-clock time becomes ``max(market, npr, bbc, ap)`` instead of their
-sum. Output interleaves; pass ``--serial`` for clean ordered output.
+By default the five pipelines run *in parallel* — they hit different
+domains (Yahoo, NPR, BBC, AP, Kyodo) so they don't compete on
+rate-limits. Wall-clock becomes ``max(market, npr, bbc, ap, kyodo)``
+instead of their sum. Output interleaves; pass ``--serial`` for clean
+ordered output.
 
 Every subroutine is idempotent — only new bars / articles are fetched
 on each run. Exits non-zero if any pipeline reported errors.
+
+CNA was previously included as the Asian source but was deprecated in
+favor of Kyodo News English, which has 9 years of public archive vs
+CNA's 50-most-recent feed. ``stratlab.news.cna`` still exists and can
+be invoked directly if you want, but it's not part of the daily
+refresh anymore.
 """
 from __future__ import annotations
 
@@ -25,7 +33,7 @@ from datetime import date, timedelta
 
 from stratlab.news import ap as ap_news
 from stratlab.news import bbc as bbc_news
-from stratlab.news import cna as cna_news
+from stratlab.news import kyodo as kyodo_news
 from stratlab.news import npr as npr_news
 from stratlab.refresh import refresh_universe
 
@@ -47,8 +55,8 @@ def _run_ap(verbose: bool):
     return ap_news.scrape(verbose=verbose)
 
 
-def _run_cna(verbose: bool):
-    return cna_news.scrape(verbose=verbose)
+def _run_kyodo(verbose: bool, window_start: date):
+    return kyodo_news.scrape(since=window_start, verbose=verbose)
 
 
 def _print_step_header(title: str) -> None:
@@ -109,9 +117,9 @@ def main() -> int:
         ap_stats = _run_ap(verbose=verbose)
         ap_news._print_summary(ap_stats)
         step += 1
-        _print_step_header(f"STEP {step} / {total}: CNA (Singapore)")
-        cna_stats = _run_cna(verbose=verbose)
-        cna_news._print_summary(cna_stats)
+        _print_step_header(f"STEP {step} / {total}: Kyodo News English (sitemap)")
+        kyodo_stats = _run_kyodo(verbose=verbose, window_start=window_start)
+        kyodo_news._print_summary(kyodo_stats)
     else:
         _print_step_header(
             f"Running {total} pipelines in parallel (output will interleave)"
@@ -122,19 +130,19 @@ def main() -> int:
                               window_start=window_start, today=today)
             f_bbc = ex.submit(_run_bbc, verbose=verbose)
             f_ap = ex.submit(_run_ap, verbose=verbose)
-            f_cna = ex.submit(_run_cna, verbose=verbose)
+            f_kyodo = ex.submit(_run_kyodo, verbose=verbose, window_start=window_start)
             if f_market is not None:
                 market = f_market.result()
             npr_stats = f_npr.result()
             bbc_stats = f_bbc.result()
             ap_stats = f_ap.result()
-            cna_stats = f_cna.result()
+            kyodo_stats = f_kyodo.result()
 
         # Print summaries cleanly after all threads have joined.
         npr_news._print_summary(npr_stats, window_start, today)
         bbc_news._print_summary(bbc_stats)
         ap_news._print_summary(ap_stats)
-        cna_news._print_summary(cna_stats)
+        kyodo_news._print_summary(kyodo_stats)
 
     sentiment_stats = None
     sentiment_ok = True
@@ -151,10 +159,10 @@ def main() -> int:
     npr_ok = npr_stats.errors == 0
     bbc_ok = bbc_stats.errors == 0
     ap_ok = ap_stats.errors == 0
-    cna_ok = cna_stats.errors == 0
+    kyodo_ok = kyodo_stats.errors == 0
     total_articles = (
         npr_stats.fetched_articles + bbc_stats.fetched_articles
-        + ap_stats.fetched_articles + cna_stats.fetched_articles
+        + ap_stats.fetched_articles + kyodo_stats.fetched_articles
     )
     elapsed = time.time() - started
 
@@ -170,8 +178,8 @@ def main() -> int:
           f"({bbc_stats.errors} errors, {bbc_stats.fetched_articles} articles)")
     print(f"  ap:     {'ok' if ap_ok else 'FAILURES'} "
           f"({ap_stats.errors} errors, {ap_stats.fetched_articles} articles)")
-    print(f"  cna:    {'ok' if cna_ok else 'FAILURES'} "
-          f"({cna_stats.errors} errors, {cna_stats.fetched_articles} articles)")
+    print(f"  kyodo:  {'ok' if kyodo_ok else 'FAILURES'} "
+          f"({kyodo_stats.errors} errors, {kyodo_stats.fetched_articles} articles)")
     print(f"  total news articles fetched: {total_articles}")
     if sentiment_stats is not None:
         print(f"  sentiment: {'ok' if sentiment_ok else 'FAILURES'} "
@@ -179,7 +187,7 @@ def main() -> int:
               f"{sentiment_stats.articles_scored} scored)")
     print("=" * 60)
 
-    return 0 if all([market_ok, npr_ok, bbc_ok, ap_ok, cna_ok, sentiment_ok]) else 1
+    return 0 if all([market_ok, npr_ok, bbc_ok, ap_ok, kyodo_ok, sentiment_ok]) else 1
 
 
 if __name__ == "__main__":

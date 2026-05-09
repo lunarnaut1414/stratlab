@@ -1,15 +1,24 @@
-"""Channel News Asia (Singapore) scraper.
+"""Channel News Asia (Singapore) scraper. **DEPRECATED — use Kyodo instead.**
 
+CNA was the original Asian source but only exposes the 50 most recent
+articles via ``/api/v1/sitemap-news-feed`` — no historical archive. It
+was replaced in the daily refresh pipeline by Kyodo News English, whose
+per-year sitemaps cover 2017+ (~10K articles per year). See
+``stratlab.news.kyodo``.
+
+This module is preserved (not deleted) so you can still run it manually
+if you want CNA's specific Singapore/SE-Asia editorial perspective::
+
+    python -m stratlab.news.cna
+
+But it's no longer wired into ``refresh_all`` or ``backfill``.
+
+Original notes (preserved for reference):
 CNA exposes a clean ``/api/v1/sitemap-news-feed`` endpoint with the 50 most
 recent articles, including ``news:publication_date`` and topic-bearing URLs
 (``/asia/``, ``/singapore/``, ``/business/``, etc). Their robots.txt sets
 ``Crawl-delay: 10`` which we respect by defaulting ``--sleep 2`` (still
 polite for a major regional outlet).
-
-NHK was considered but their robots.txt explicitly disallows AI/scraper
-bots (``User-agent: anthropic-ai`` ``Disallow: /``) so we go with CNA
-instead — equivalent profile (English-language Asian flagship) and
-explicitly scrape-friendly.
 """
 from __future__ import annotations
 

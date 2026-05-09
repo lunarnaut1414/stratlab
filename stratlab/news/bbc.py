@@ -31,6 +31,9 @@ from urllib.parse import urlparse
 import requests
 from bs4 import BeautifulSoup
 
+from pathlib import Path
+
+from stratlab.news import storage
 from stratlab.news.storage import NEWS_DIR, load_day, save_day
 
 SOURCE = "bbc"
@@ -128,6 +131,55 @@ def _sleep(base: float, jitter: float = 1.0) -> None:
     if base <= 0:
         return
     time.sleep(base + random.random() * jitter)
+
+
+def _format_duration(seconds: float) -> str:
+    """Compact human duration, e.g. '3d 7h 12m', '4h 9m', '38m', '12s'."""
+    if seconds is None or seconds < 0 or seconds != seconds:  # NaN guard
+        return "?"
+    seconds = int(seconds)
+    if seconds < 60:
+        return f"{seconds}s"
+    minutes, sec = divmod(seconds, 60)
+    if minutes < 60:
+        return f"{minutes}m"
+    hours, minutes = divmod(minutes, 60)
+    if hours < 24:
+        return f"{hours}h {minutes}m"
+    days, hours = divmod(hours, 24)
+    return f"{days}d {hours}h {minutes}m"
+
+
+_DATE_PREFIX_RE = re.compile(r"^\d{4}-\d{2}-\d{2}-")
+
+
+def _known_article_ids(news_dir: Path | None = None) -> set[str]:
+    """Collect every BBC article's URL-slug ID across all day-files on disk.
+
+    Day-file keys are ``"<YYYY-MM-DD>-<url_slug_id>"`` (or just the slug if
+    the parser couldn't determine a publication date). We strip the date
+    prefix and store the slug — the same slug ``_extract_article_id``
+    returns from a URL — so the deep-backfill pre-fetch check can match
+    without round-tripping through the HTML.
+    """
+    if news_dir is None:
+        # Resolve at call time so test monkeypatches of storage.NEWS_DIR
+        # are honored (the module-level NEWS_DIR was bound at import time).
+        news_dir = storage.NEWS_DIR
+    bbc_root = news_dir / SOURCE
+    if not bbc_root.exists():
+        return set()
+    known: set[str] = set()
+    for json_file in bbc_root.rglob("*.json"):
+        try:
+            data = _json.loads(json_file.read_text())
+        except (OSError, _json.JSONDecodeError):
+            continue
+        for key in data.keys():
+            slug = _DATE_PREFIX_RE.sub("", key, count=1)
+            if slug:
+                known.add(slug)
+    return known
 
 
 def _extract_article_id(url: str) -> str | None:
@@ -447,6 +499,13 @@ def scrape_via_sitemap(
     if verbose:
         print(f"  total candidates: {len(candidates):,}")
 
+    # Build a set of article slugs already on disk so we can short-circuit
+    # before any article HTTP fetch. On a re-run from 2009, this turns the
+    # backfill from "fetch every article URL" into "only fetch what's new."
+    known_ids = _known_article_ids()
+    if verbose and known_ids:
+        print(f"  {len(known_ids):,} article IDs already on disk — will skip those URLs")
+
     # Sort by lastmod descending so freshest content lands first if the user
     # interrupts a long backfill.
     candidates.sort(key=lambda t: t[1], reverse=True)
@@ -455,15 +514,44 @@ def scrape_via_sitemap(
     # gets a slice of candidates, fetches, decides topic, saves to the right
     # day-file. Day-file caching is keyed on (topic, day) within the worker.
     chunks = _chunk(candidates, max(1, workers))
+    total_candidates = len(candidates)
+    backfill_start = time.time()
+
+    # Flush cadence: save dirty buckets every N fetched articles or T seconds,
+    # whichever comes first. Survives Ctrl+C and gives the user visible
+    # progress on long backfills.
+    FLUSH_EVERY_N_ARTICLES = 20
+    FLUSH_EVERY_SECONDS = 30.0
 
     def run_chunk(items: list[tuple[str, date, str]]) -> None:
         session = _new_session()
         day_cache: dict[tuple[str, date], dict[str, dict]] = {}
         dirty: set[tuple[str, date]] = set()
+        chunk_fetched = 0
+        chunk_processed = 0  # incl. skips and errors — for progress logging
+        last_flush = time.time()
+
+        def flush() -> None:
+            for (target_topic, day) in dirty:
+                # Re-load from disk before saving so other workers' writes to
+                # the same (topic, day) bucket aren't clobbered.
+                merged = load_day(SOURCE, target_topic, day) or {}
+                merged.update(day_cache[(target_topic, day)])
+                save_day(SOURCE, target_topic, day, merged)
+                day_cache[(target_topic, day)] = merged
+                stats.add(days_updated=1)
+            dirty.clear()
 
         for url, lastmod, _hint_topic in items:
+            chunk_processed += 1
             article_id_raw = _extract_article_id(url)
             if not article_id_raw:
+                continue
+            # Pre-fetch skip: if this slug is already on disk under any
+            # (topic, day) bucket, don't waste an HTTP request to learn
+            # that it's a duplicate.
+            if article_id_raw in known_ids:
+                stats.add(skipped_already_have=1)
                 continue
             try:
                 _sleep(sleep)
@@ -501,10 +589,35 @@ def scrape_via_sitemap(
             day_cache[cache_key][article.id] = asdict(article)
             dirty.add(cache_key)
             stats.add(fetched_articles=1, by_topic={target_topic: 1})
+            chunk_fetched += 1
 
-        for (target_topic, day) in dirty:
-            save_day(SOURCE, target_topic, day, day_cache[(target_topic, day)])
-            stats.add(days_updated=1)
+            now = time.time()
+            if (chunk_fetched > 0
+                and (chunk_fetched % FLUSH_EVERY_N_ARTICLES == 0
+                     or now - last_flush > FLUSH_EVERY_SECONDS)):
+                flush()
+                last_flush = now
+                if verbose:
+                    # Global progress / ETA — combine all workers' counters.
+                    processed_global = (
+                        stats.fetched_articles + stats.skipped_already_have
+                        + stats.errors
+                    )
+                    elapsed = now - backfill_start
+                    rate = processed_global / elapsed if elapsed > 0 else 0.0
+                    remaining = max(0, total_candidates - processed_global)
+                    eta = _format_duration(remaining / rate) if rate > 0 else "?"
+                    global_pct = 100.0 * processed_global / max(total_candidates, 1)
+                    print(
+                        f"  [progress] global {processed_global:,}/"
+                        f"{total_candidates:,} ({global_pct:.2f}%) — "
+                        f"{stats.fetched_articles:,} fetched, "
+                        f"{stats.skipped_already_have:,} skipped, "
+                        f"{stats.errors:,} errors | "
+                        f"rate {rate:.1f}/s | ETA {eta} | flushed"
+                    )
+
+        flush()
 
     if workers <= 1 or len(chunks) == 1:
         for chunk in chunks:

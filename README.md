@@ -6,13 +6,20 @@ Algorithmic trading backtest gym built for AI agents. Design strategies in Pytho
 
 ```
 stratlab/
-  data/          Market data fetching & caching (yfinance)
+  data/          Market data fetching & caching (yfinance, ~850 tickers)
   engine/        Backtest engine + simulated broker
-  strategies/    Strategy base class + built-in examples
+  strategies/    Strategy base class + 8 built-in templates
+  indicators.py  Curated TA primitives (thin facade over `ta`)
+  evaluation.py  walk_forward + compare_to_benchmark
+  analytics/     Metrics, trade extraction, multi-panel tearsheet
+  news/          NPR/BBC/AP/Kyodo scrapers + FinBERT sentiment
   gym/           Gymnasium-compatible RL environment
-  analytics/     Performance metrics & equity curve plotting
 examples/        Quickstart scripts
+tests/           64 deterministic tests (engine, trades, metrics, ...)
+tmp/             Scratch directory for tearsheets and demo scripts
 ```
+
+For deep usage detail and command reference, see [`CHEATSHEET.md`](./CHEATSHEET.md).
 
 ## Install
 
@@ -48,9 +55,13 @@ class MyStrategy(Strategy):
     def on_bar(self, ctx: BarContext):
         if ctx.idx < 20:
             return []
-        closes = ctx.history()["close"]  # already sliced to [0, idx]
+        # ctx.history() returns bars BEFORE today (today is hidden until fill).
+        # iloc[-1] is yesterday's close — the most recent observable bar.
+        closes = ctx.history()["close"]
         if closes.iloc[-1] > closes.iloc[-20:].mean():
-            return [Order(side=OrderSide.BUY, size=100)]
+            return [Order(side=OrderSide.BUY, size=100)]              # market order
+            # — or, with a limit:
+            # return [Order(side=OrderSide.BUY, size=100, limit_price=closes.iloc[-1] * 0.99)]
         return []
 ```
 
@@ -106,6 +117,59 @@ obs, info = env.reset()
 obs, reward, terminated, truncated, info = env.step(action=1)  # buy
 ```
 
+## Indicators
+
+`stratlab.indicators` is a thin facade over `ta` exposing ~25 curated
+primitives under one stable namespace:
+
+```python
+from stratlab.indicators import (
+    sma, ema, wma, macd, macd_signal, macd_diff,
+    rsi, roc, stoch, stoch_signal, atr, adx, cci,
+    bb_upper, bb_lower, bb_middle, bb_pband,
+    donchian_upper, donchian_lower,
+    obv, mfi, cmf, vwap, aroon_up, aroon_down,
+)
+```
+
+All take pandas `Series` and return a `Series` aligned to the input
+index — safe to call inside `on_bar` on the sliced `ctx.history()`
+frame. For exotic primitives (Williams %R, Ulcer, KAMA, Vortex, …)
+import directly from `ta.momentum` / `ta.volatility` / `ta.trend` /
+`ta.volume`.
+
+## Out-of-sample evaluation
+
+```python
+from stratlab import Backtest, walk_forward, compare_to_benchmark, tearsheet
+
+# Per-window metrics across rolling N-year slices.
+wf = walk_forward(strategy, data, window_years=1.0)
+
+# Strategy vs buy-and-hold of any ticker or price Series.
+result = Backtest(data=..., strategy=...).run()
+cmp = compare_to_benchmark(result, benchmark="SPY")
+
+# 5-panel performance report (equity vs benchmark, drawdown, monthly heatmap,
+# rolling Sharpe, trade scatter), saved as standalone interactive HTML.
+fig = tearsheet(result, benchmark="SPY", title="My Strategy")
+fig.write_html("tmp/strategy.html")
+```
+
+## Tests
+
+64 deterministic tests on synthetic data — no yfinance, no FinBERT, no
+HTTP. Whole suite runs in <1s. Locks in engine invariants
+(no-look-ahead, cash conservation, fill semantics, limit-fill rules,
+gap protection), trade extraction edge cases (flips, partial closes,
+pyramiding), evaluation correctness, news-scraper resume guarantees,
+and storage atomicity.
+
+```bash
+pip install -e ".[dev]"
+pytest tests/ -v
+```
+
 ## Gym Environment
 
 The `TradingEnv` follows the standard Gymnasium API:
@@ -118,11 +182,16 @@ The `TradingEnv` follows the standard Gymnasium API:
 
 ## Built-in Strategies
 
-| Strategy | Description | Key Params |
-|----------|-------------|------------|
-| `SMACrossover` | Fast/slow SMA crossover | `fast`, `slow` |
-| `MeanReversion` | Bollinger Band mean reversion | `window`, `num_std` |
-| `Momentum` | RSI-based momentum | `period`, `oversold`, `overbought` |
+| Strategy | Module | Description |
+|---|---|---|
+| `SMACrossover` | `strategies.sma_crossover` | Fast/slow SMA crossover, single-asset |
+| `Momentum` | `strategies.momentum` | RSI mean-reversion, single-asset |
+| `MeanReversion` | `strategies.mean_reversion` | Bollinger-band reversion using **limit orders** |
+| `DonchianBreakout` | `strategies.donchian_breakout` | Turtle-style 20/10 breakout, single-asset |
+| `CrossSectionalFactor` | `strategies.cross_sectional` | Long top-K / short bottom-K by user-supplied factor (default 12-1 momentum) |
+| `Pairs` | `strategies.pairs` | Z-score mean-reversion on a hand-picked symbol pair |
+| `NewsOverlay` | `strategies.news_overlay` | Trend gated by daily aggregated news sentiment |
+| `MomentumPlusInverse` | `strategies.momentum_plus_inverse` | Long top-K momentum + tactical SH hedge when SPY < 200d SMA |
 
 ## Performance Metrics
 
@@ -168,12 +237,58 @@ The simulated broker models:
 > **Margin is not enforced.** The broker doesn't check Reg-T or maintenance
 > margin — strategies are responsible for sizing within reasonable leverage.
 
-## Execution timing
+## Execution model
 
-Orders submitted by `on_bar` on bar `i` are filled at bar `i+1`'s open with
-slippage applied — you can't decide on a close and fill at that close. Orders
-submitted on the final bar are dropped and surfaced as `dropped_orders` in the
-metrics dict. Held positions are marked-to-market at each bar's close.
+**Same-bar limit-intraday with structural look-ahead prevention.** Each bar `i`:
+
+1. **`on_bar(ctx)` runs before bar `i` is observed.** `ctx.history()`,
+   `ctx.closes()`, and `ctx.closes_window()` return data through bar `i-1`
+   only. There is *no API* a strategy can use to read today's open, high,
+   low, or close — look-ahead is prevented by construction, not by
+   convention. `ctx.idx == i` still names the bar where any returned
+   orders will execute, but its data is invisible until after fills.
+2. **Each returned `Order` is checked against bar `i`'s OHLC range:**
+
+   | Order | Fills when | Fill price |
+   |---|---|---|
+   | `Order(BUY, size)` (market) | always | `bar.open × (1 + slippage_pct)` |
+   | `Order(SELL, size)` (market) | always | `bar.open × (1 − slippage_pct)` |
+   | `Order(BUY, size, limit_price=L)` | `bar.low ≤ L` | `min(L, bar.open)` — gap-down gives the better gap-open price |
+   | `Order(SELL, size, limit_price=L)` | `bar.high ≥ L` | `max(L, bar.open)` — gap-up gives the better gap-open price |
+
+   Limit orders **don't get slippage applied** — you specified the price.
+   Limits whose range condition isn't met are dropped (counted in
+   `metrics["dropped_orders"]`).
+3. **Equity[i] is marked to bar `i`'s close** *after* fills, so the
+   position-value side reflects today's mark.
+
+### Same-bar round-trips
+
+A strategy that submits a paired `BUY` limit + `SELL` limit on the same
+bar can produce a true intra-day round-trip when today's range crosses
+both limits. `MeanReversion` is the showcase — submits a buy limit at
+the lower Bollinger band and a sell limit at the upper, on every bar.
+
+### What this model deliberately doesn't capture
+
+| Real-world mechanic | Modeled? |
+|---|---|
+| Borrow / locate availability for shorts | ❌ assumed available |
+| Reg-T / maintenance margin | ❌ not enforced |
+| Hard-to-borrow rate per name | ❌ flat `borrow_rate_annual` |
+| Recall / forced cover | ❌ |
+| Partial fills | ❌ orders fill in full or not at all |
+| Market impact | ❌ a 1-share order fills at the same price as a 1M-share order |
+| Intraday tick-by-tick path | ❌ only OHLC range matters |
+| Options | ❌ pure cash equities (and equity ETFs) |
+| Borrow cost on short notional | ✅ accrued daily on absolute short notional |
+| Slippage (market) | ✅ |
+| Commission | ✅ |
+| Cross-sectional alignment & late-listed names | ✅ |
+| Borrow accrual over weekends/holidays | ✅ calendar-day basis |
+
+For daily-bar Yahoo data this set of simplifications is industry-standard.
+Going to intraday data or live trading would require extending the broker.
 
 ## Data
 
@@ -225,18 +340,62 @@ than VXX/UVXY for vol-aware strategies.
 
 ### Refresh the local cache
 
-```bash
-python -m stratlab.refresh                       # market data: ~850 tickers
-python -m stratlab.refresh --tickers AAPL MSFT   # specific tickers
-python -m stratlab.refresh --start 2020-01-01    # only fetch from 2020 onward
+The daily incremental — market data + recent news from 4 sources, ~7-day
+window, all in parallel:
 
-python -m stratlab.news.npr                      # news: last 7 days, all topics
-python -m stratlab.news.npr --topics economy --start 2024-01-01 --end 2024-12-31
+```bash
+python -m stratlab.refresh_all                   # everything, parallel (default)
+python -m stratlab.refresh_all --news-only       # skip the market step
+python -m stratlab.refresh_all --with-sentiment  # also score new articles with FinBERT
 ```
 
-News articles land in ``data/news/npr/<topic>/<year>.json``, keyed by article
-ID so re-runs skip what's already on disk. 8 topics: politics, economy,
-science, world, news, business, technology, culture.
+Or run a single pipeline:
+
+```bash
+python -m stratlab.refresh                       # market data only (~850 tickers)
+python -m stratlab.refresh --tickers AAPL MSFT   # specific tickers
+
+python -m stratlab.news.npr                      # NPR scraper (date-archive)
+python -m stratlab.news.bbc                      # BBC scraper (RSS)
+python -m stratlab.news.ap                       # AP News (topic hubs)
+python -m stratlab.news.kyodo                    # Kyodo News English (per-year sitemaps)
+
+python -m stratlab.news.cna                      # CNA — DEPRECATED, kept opt-in only
+```
+
+For deep historical news, the dedicated backfill job is **separate** from
+the daily refresh — three sources expose public archives:
+
+| Source | Archive depth |
+|---|---|
+| NPR | back to ~2000 (date-archive walker) |
+| BBC | back to ~2009-09 (XML sitemap, ~120 child files) |
+| Kyodo | back to 2017 (per-year sitemaps, ~10K articles/year) |
+
+```bash
+python -m stratlab.news.backfill --since 2017-01-01 --workers 6   # all three, sequential
+python -m stratlab.news.backfill --days 365 --sources npr         # NPR only
+python -m stratlab.news.backfill --since 2017-01-01 --sources kyodo --parallel
+```
+
+Backfills are **resumable** (verified by tests). NPR skips at the day
+level; BBC and Kyodo skip at the article-slug level by indexing every
+on-disk slug at startup — re-runs only HTTP-fetch the gaps. Each
+scraper flushes to disk every 20 articles or 30 seconds, so Ctrl+C is
+safe.
+
+To enable FinBERT sentiment (optional dep — pulls torch + transformers):
+
+```bash
+pip install -e ".[sentiment]"
+python -m stratlab.news.sentiment                  # score every unscored article
+python -m stratlab.news.sentiment --sources kyodo  # one source at a time
+```
+
+Auto-picks CUDA → MPS → CPU. ~10-100 articles/sec depending on hardware.
+Scored articles get a `sentiment` payload with `pos/neg/neutral/net`
+probabilities written back to the same JSON. Aggregated daily features
+load via `daily_sentiment(start, end, sources, topics)`.
 
 By default refresh uses yfinance's `period="max"` for cold fetches, so each
 ticker gets its full available history per its own inception (AAPL → 1980,

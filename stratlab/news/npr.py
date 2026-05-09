@@ -81,6 +81,10 @@ class NPRScrapeStats:
     errors: int = 0
     by_topic: dict[str, int] = field(default_factory=dict)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    # Progress tracking (set by ``scrape``; read by ``report_progress``).
+    _start_time: float = 0.0
+    _total_units: int = 0
+    _last_log_time: float = 0.0
 
     def add(self, **kwargs) -> None:
         with self._lock:
@@ -90,6 +94,48 @@ class NPRScrapeStats:
                         self.by_topic[topic] = self.by_topic.get(topic, 0) + n
                 else:
                     setattr(self, k, getattr(self, k) + v)
+
+    def report_progress(self, verbose: bool, log_every_seconds: float = 30.0) -> None:
+        """Periodic global progress + ETA, called after each (topic, day)
+        unit. Quiet for the first ``log_every_seconds`` and then steady-state."""
+        if not verbose or self._total_units <= 0:
+            return
+        now = time.time()
+        with self._lock:
+            if now - self._last_log_time < log_every_seconds:
+                return
+            self._last_log_time = now
+            done = self.days_visited + self.days_skipped_cached
+            total = self._total_units
+            elapsed = now - self._start_time
+            rate = done / elapsed if elapsed > 0 else 0.0
+            remaining = max(0, total - done)
+            pct = 100.0 * done / total if total else 0.0
+            eta = _format_duration(remaining / rate) if rate > 0 else "?"
+            print(
+                f"  [progress] {done:,}/{total:,} day-units ({pct:.2f}%) — "
+                f"{self.fetched_articles:,} articles fetched, "
+                f"{self.days_skipped_cached:,} cached, "
+                f"{self.days_with_no_articles:,} empty, "
+                f"{self.errors:,} errors | rate {rate:.1f}/s | ETA {eta}"
+            )
+
+
+def _format_duration(seconds: float) -> str:
+    """Compact human duration, e.g. '3d 7h 12m', '4h 9m', '38m', '12s'."""
+    if seconds is None or seconds < 0 or seconds != seconds:
+        return "?"
+    seconds = int(seconds)
+    if seconds < 60:
+        return f"{seconds}s"
+    minutes, sec = divmod(seconds, 60)
+    if minutes < 60:
+        return f"{minutes}m"
+    hours, minutes = divmod(minutes, 60)
+    if hours < 24:
+        return f"{hours}h {minutes}m"
+    days, hours = divmod(hours, 24)
+    return f"{days}d {hours}h {minutes}m"
 
 
 # ---------------------------------------------------------------------------
@@ -332,6 +378,7 @@ def _scrape_topic(
     day = start
     while day <= end:
         _scrape_topic_day(topic, day, session, sleep, stats, verbose)
+        stats.report_progress(verbose)
         day += timedelta(days=1)
 
 
@@ -357,6 +404,15 @@ def scrape(
         start, end = end, start
 
     stats = NPRScrapeStats()
+    n_days = (end - start).days + 1
+    stats._total_units = len(topics) * n_days
+    stats._start_time = time.time()
+    stats._last_log_time = stats._start_time
+    if verbose:
+        print(
+            f"NPR backfill: {len(topics)} topic(s) × {n_days:,} day(s) "
+            f"= {stats._total_units:,} day-units to walk"
+        )
 
     if workers <= 1:
         for topic in topics:

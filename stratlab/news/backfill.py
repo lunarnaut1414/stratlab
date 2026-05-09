@@ -2,24 +2,26 @@
 
 The daily ``stratlab.refresh_all`` job is intentionally narrow: a ~7-day
 incremental window. This module is the opposite — a one-shot job for
-pulling deep history from the *only* two sources whose archives expose
-it:
+pulling deep history from the *only* three sources whose archives
+expose it:
 
 - **NPR** has a date-archive walker (``/sections/<topic>/archive?date=...``)
   that goes back to ~2000.
-- **BBC** has an XML sitemap covering ~2009 → today.
+- **BBC** has an XML sitemap covering ~2009-09 → today (~120 child sitemaps).
+- **Kyodo News English** has per-year sitemaps covering 2017 → today
+  (~10K articles per year).
 
-AP and CNA do not expose historical archives, so they're not included
-here — for AP/CNA history, run the daily refresh on a cron and let it
-accumulate.
+AP and CNA do not expose historical archives (AP only surfaces ~80-100
+recent per topic-hub; CNA's sitemap-news-feed only exposes 50). For
+those, run the daily refresh on cron and let it accumulate.
 
-By default NPR and BBC run sequentially (serial). They hit different
-domains, so ``--parallel`` would also work without rate-limit conflicts;
-left off by default to keep output legible during long backfills.
+By default the deep sources run sequentially. They hit different
+domains, so ``--parallel`` is also safe — left off by default to keep
+output legible during multi-day backfills.
 
 Examples::
 
-    # 1 year of NPR + BBC
+    # 1 year of all three sources
     python -m stratlab.news.backfill --days 365
 
     # Absolute date range
@@ -27,8 +29,9 @@ Examples::
 
     # Only one source
     python -m stratlab.news.backfill --since 2020-01-01 --sources npr
+    python -m stratlab.news.backfill --since 2017-01-01 --sources kyodo
 
-    # Crank parallelism within each source (per-topic workers)
+    # Crank parallelism within each source
     python -m stratlab.news.backfill --since 2020-01-01 --workers 6
 """
 from __future__ import annotations
@@ -40,9 +43,10 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import date, timedelta
 
 from stratlab.news import bbc as bbc_news
+from stratlab.news import kyodo as kyodo_news
 from stratlab.news import npr as npr_news
 
-DEEP_SOURCES = ("npr", "bbc")
+DEEP_SOURCES = ("npr", "bbc", "kyodo")
 
 
 def _print_step_header(title: str) -> None:
@@ -65,6 +69,12 @@ def _run_bbc(window_start: date, workers: int, verbose: bool):
     )
 
 
+def _run_kyodo(window_start: date, workers: int, verbose: bool):
+    return kyodo_news.scrape(
+        since=window_start, workers=workers, verbose=verbose,
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument(
@@ -77,16 +87,16 @@ def main() -> int:
     )
     parser.add_argument(
         "--sources", nargs="*", choices=DEEP_SOURCES, default=list(DEEP_SOURCES),
-        help=f"Sources to backfill (default: {' '.join(DEEP_SOURCES)}).",
+        help=f"Sources to backfill (default: all three — {' '.join(DEEP_SOURCES)}).",
     )
     parser.add_argument(
         "--workers", type=int, default=4,
-        help="Per-source parallelism — both NPR and BBC scrape topics in "
-             "parallel internally (default 4).",
+        help="Per-source parallelism — each source distributes work across "
+             "its own thread pool internally (default 4).",
     )
     parser.add_argument(
         "--parallel", action="store_true",
-        help="Run NPR and BBC in parallel rather than sequentially.",
+        help="Run all selected sources in parallel rather than sequentially.",
     )
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args()
@@ -110,60 +120,56 @@ def main() -> int:
           f"({(today - window_start).days} days)")
     print(f"Sources: {', '.join(args.sources)}  |  workers/source: {args.workers}")
 
-    npr_stats = bbc_stats = None
+    runners = {
+        "npr":   lambda: _run_npr(window_start, today, args.workers, verbose),
+        "bbc":   lambda: _run_bbc(window_start, args.workers, verbose),
+        "kyodo": lambda: _run_kyodo(window_start, args.workers, verbose),
+    }
+    headers = {
+        "npr":   "NPR (date-archive walker)",
+        "bbc":   "BBC (XML sitemap)",
+        "kyodo": "Kyodo News English (per-year sitemaps)",
+    }
+    summarizers = {
+        "npr":   lambda s: npr_news._print_summary(s, window_start, today),
+        "bbc":   bbc_news._print_summary,
+        "kyodo": kyodo_news._print_summary,
+    }
 
-    def run_npr():
-        return _run_npr(window_start, today, args.workers, verbose)
+    selected = [s for s in DEEP_SOURCES if s in args.sources]
+    results: dict[str, object] = {}
 
-    def run_bbc():
-        return _run_bbc(window_start, args.workers, verbose)
-
-    if args.parallel and len(args.sources) > 1:
-        _print_step_header("Running NPR + BBC in parallel")
-        with ThreadPoolExecutor(max_workers=2) as ex:
-            f_npr = ex.submit(run_npr) if "npr" in args.sources else None
-            f_bbc = ex.submit(run_bbc) if "bbc" in args.sources else None
-            if f_npr is not None:
-                npr_stats = f_npr.result()
-            if f_bbc is not None:
-                bbc_stats = f_bbc.result()
+    if args.parallel and len(selected) > 1:
+        _print_step_header(f"Running {' + '.join(selected)} in parallel")
+        with ThreadPoolExecutor(max_workers=len(selected)) as ex:
+            futures = {ex.submit(runners[s]): s for s in selected}
+            for fut, source in list(futures.items()):
+                results[source] = fut.result()
+        for source in selected:
+            summarizers[source](results[source])
     else:
-        if "npr" in args.sources:
-            _print_step_header("NPR (date-archive walker)")
-            npr_stats = run_npr()
-            npr_news._print_summary(npr_stats, window_start, today)
-        if "bbc" in args.sources:
-            _print_step_header("BBC (XML sitemap)")
-            bbc_stats = run_bbc()
-            bbc_news._print_summary(bbc_stats)
-
-    if args.parallel:
-        if npr_stats is not None:
-            npr_news._print_summary(npr_stats, window_start, today)
-        if bbc_stats is not None:
-            bbc_news._print_summary(bbc_stats)
+        for source in selected:
+            _print_step_header(headers[source])
+            results[source] = runners[source]()
+            summarizers[source](results[source])
 
     elapsed = time.time() - started
-    npr_ok = npr_stats is None or npr_stats.errors == 0
-    bbc_ok = bbc_stats is None or bbc_stats.errors == 0
-    fetched = (
-        (npr_stats.fetched_articles if npr_stats else 0)
-        + (bbc_stats.fetched_articles if bbc_stats else 0)
-    )
-
+    all_ok = True
+    fetched_total = 0
     print()
     print("=" * 60)
     print(f"Backfill complete in {elapsed/60:.1f} min")
-    if npr_stats is not None:
-        print(f"  npr: {'ok' if npr_ok else 'FAILURES'} "
-              f"({npr_stats.errors} errors, {npr_stats.fetched_articles} articles)")
-    if bbc_stats is not None:
-        print(f"  bbc: {'ok' if bbc_ok else 'FAILURES'} "
-              f"({bbc_stats.errors} errors, {bbc_stats.fetched_articles} articles)")
-    print(f"  total articles fetched: {fetched}")
+    for source in selected:
+        s = results[source]
+        ok = s.errors == 0
+        all_ok = all_ok and ok
+        fetched_total += s.fetched_articles
+        print(f"  {source:6s}: {'ok' if ok else 'FAILURES'} "
+              f"({s.errors} errors, {s.fetched_articles:,} articles)")
+    print(f"  total articles fetched: {fetched_total:,}")
     print("=" * 60)
 
-    return 0 if (npr_ok and bbc_ok) else 1
+    return 0 if all_ok else 1
 
 
 if __name__ == "__main__":

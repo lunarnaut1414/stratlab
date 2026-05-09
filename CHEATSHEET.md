@@ -14,46 +14,52 @@ python -m stratlab.refresh_all --quiet      # only summaries
 ```
 
 Pulls market data (~850 tickers) and recent articles (~7-day window)
-from NPR, BBC, AP, and CNA. Pipelines run in parallel by default
+from NPR, BBC, AP, and Kyodo. Pipelines run in parallel by default
 (different domains don't compete on rate-limits), so wall-clock is
-`max(market, npr, bbc, ap, cna)` — typically 5-15 minutes warm. Output
-interleaves; `--serial` for clean ordered output. Idempotent:
+`max(market, npr, bbc, ap, kyodo)` — typically 5-15 minutes warm.
+Output interleaves; `--serial` for clean ordered output. Idempotent:
 re-running the same day finishes in seconds.
 
 `refresh_all` is for the *incremental* job — what's new since
 yesterday. For historical backfill, see the dedicated `news.backfill`
 command below.
 
+CNA was the original Asian source but is **deprecated** as of the
+Kyodo migration — Kyodo English has 9 years of public archive
+(2017+) vs CNA's 50-most-recent feed. CNA still runs as a standalone
+command if you want it, but it's no longer in the daily refresh.
+
 ---
 
 ## Deep news backfill
 
 `stratlab.news.backfill` is the one-shot job for pulling historical
-news from the only two sources whose archives expose it:
+news from the three sources whose archives expose it:
 
 | Source | Archive depth | Mechanism |
 |---|---|---|
 | NPR | back to ~2000 | date-archive walker (`/sections/<topic>/archive?date=...`) |
 | BBC | back to ~2009 | XML sitemap (`https-index-com-archive.xml`) |
+| Kyodo | back to 2017 | per-year sitemaps (`sitemap-2017.xml` … `sitemap-<current>.xml`) |
 | AP  | none | (run daily refresh on cron to accumulate) |
-| CNA | none | (run daily refresh on cron to accumulate) |
+| CNA | none | (deprecated; opt-in only) |
 
 ```bash
-# 1 year of NPR + BBC, run sequentially (default)
-python -m stratlab.news.backfill --days 365
-
-# Absolute date range
-python -m stratlab.news.backfill --since 2020-01-01
+# All three sources at full depth, run sequentially (default)
+python -m stratlab.news.backfill --since 2017-01-01 --workers 6
 
 # Just one source
-python -m stratlab.news.backfill --since 2020-01-01 --sources npr
+python -m stratlab.news.backfill --since 2017-01-01 --sources kyodo
+python -m stratlab.news.backfill --since 2009-09-04 --sources bbc
 
-# Run NPR and BBC in parallel; crank per-source workers higher
-python -m stratlab.news.backfill --since 2020-01-01 --parallel --workers 8
+# Run all three in parallel; crank per-source workers higher
+python -m stratlab.news.backfill --since 2017-01-01 --parallel --workers 8
 ```
 
-The backfill is idempotent (per-day file existence ⇒ skip) so a crashed
-run can be re-invoked safely.
+The backfill is idempotent: NPR skips at the day-file level; BBC and
+Kyodo skip at the article-slug level by indexing every on-disk slug
+at startup. Re-runs only HTTP-fetch genuine gaps. Each scraper also
+flushes to disk every 20 articles or 30 seconds, so Ctrl+C is safe.
 
 The first run is slow (~5-10 min) because it cold-fetches max history per
 ticker. Every run after that just appends yesterday's bar.
@@ -79,7 +85,9 @@ python -m stratlab.refresh                    # market only
 python -m stratlab.news.npr                   # NPR only (date-archive walker)
 python -m stratlab.news.bbc                   # BBC only (RSS-driven)
 python -m stratlab.news.ap                    # AP only (topic-hub walker)
-python -m stratlab.news.cna                   # CNA only (Singapore, sitemap-feed)
+python -m stratlab.news.kyodo                 # Kyodo News English (per-year sitemaps)
+
+python -m stratlab.news.cna                   # CNA — deprecated, opt-in only
 ```
 
 Each news source has its own topic vocabulary and own `--topics` choices.
@@ -136,7 +144,7 @@ needs `pip install -e ".[sentiment]"` for torch + transformers).
 python -m stratlab.news.sentiment
 
 # Just one source
-python -m stratlab.news.sentiment --sources cna
+python -m stratlab.news.sentiment --sources kyodo
 
 # Only recent files (resumable: already-scored articles are skipped)
 python -m stratlab.news.sentiment --since 2024-01-01
@@ -154,7 +162,7 @@ from stratlab import daily_sentiment
 
 # Default: one column per (source, topic), values = mean net sentiment
 sent = daily_sentiment(start="2024-01-01", end="2024-12-31",
-                       sources=["npr", "ap", "cna"], topics=["business"])
+                       sources=["npr", "ap", "kyodo"], topics=["business"])
 
 # Full breakdown: pos/neg/neutral/article_count per (source, topic)
 sent_full = daily_sentiment(start="2024-01-01", breakdown=True)
