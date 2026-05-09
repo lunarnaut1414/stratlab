@@ -1,26 +1,32 @@
-"""NPR archive scraper.
+"""NPR archive scraper, per-day storage.
 
-Walks ``npr.org/sections/<topic>/archive?date=<YYYY-MM-DD>`` one day at a time
-and pulls each article's title / author(s) / content / URL into a per-topic
-per-year JSON file under ``data/news/npr/<topic>/<year>.json``.
+Walks ``npr.org/sections/<topic>/archive?date=<YYYY-MM-DD>`` one day at a time,
+extracts each article's title / authors / content / URL, and saves the day's
+articles to ``data/news/npr/<topic>/<YYYY>/<YYYY-MM-DD>.json``.
 
-Resumable — articles already on disk are skipped on subsequent runs. Polite
-sleep (default 2-3s) between requests; tune via ``--sleep``.
+Day-level resume: if the day file already exists locally, the entire day is
+skipped (zero HTTP requests). Empty days still get a ``{}`` file written so
+they don't get re-checked. Atomic writes ensure a crash mid-day leaves no
+partial state — the next run redoes that day cleanly.
 
 Usage::
 
-    python -m stratlab.news.npr                                  # last 7 days, all topics
-    python -m stratlab.news.npr --topics economy technology     # subset
-    python -m stratlab.news.npr --start 2024-01-01 --end 2024-12-31  # date range
+    python -m stratlab.news.npr                       # last 7 days, all topics
+    python -m stratlab.news.npr --full                # all of 2000→today
+    python -m stratlab.news.npr --start 2024-01-01    # explicit window
+    python -m stratlab.news.npr --workers 4           # parallelize across topics
 """
 from __future__ import annotations
 
 import argparse
 import json
+import random
 import re
 import shutil
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -28,12 +34,16 @@ from pathlib import Path
 import requests
 from bs4 import BeautifulSoup
 
-from stratlab.data.provider import MARKET_DIR
+from stratlab.news.storage import (
+    NEWS_DIR,
+    day_exists,
+    day_path,
+    load_day,
+    save_day,
+)
 
-# News data lives next to market data. MARKET_DIR is the project's data root.
-NEWS_DIR: Path = MARKET_DIR.parent / "news"
 NPR_DIR: Path = NEWS_DIR / "npr"
-LEGACY_NPR_DIR: Path = MARKET_DIR.parent.parent / "data" / "npr"  # ../data/npr if MARKET_DIR is data/market
+LEGACY_BACKUP_DIR: Path = NEWS_DIR / "_legacy_yearly_backup" / "npr"
 
 TOPICS: tuple[str, ...] = (
     "politics", "economy", "science", "world", "news",
@@ -42,8 +52,11 @@ TOPICS: tuple[str, ...] = (
 
 ARCHIVE_URL = "https://www.npr.org/sections/{topic}/archive?date={date}"
 USER_AGENT = "stratlab/0.1 (https://github.com/lunarnaut1414/stratlab) python-requests"
+SOURCE = "npr"
+FULL_BACKFILL_START = date(2000, 1, 1)
 
 _SENTENCE_SPACE_RE = re.compile(r"([.!?])(?=[^ \n])")
+_LEGACY_NAME_RE = re.compile(r"^(?P<topic>[^/]+?)/(?P<year>\d{4})\.json$")
 
 
 @dataclass
@@ -57,22 +70,37 @@ class Article:
     content: str
     disclaimer: str = ""
 
-    @classmethod
-    def field_names(cls) -> tuple[str, ...]:
-        return tuple(f.name for f in fields_of(cls))
+
+@dataclass
+class NPRScrapeStats:
+    days_visited: int = 0
+    days_skipped_cached: int = 0
+    days_with_no_articles: int = 0
+    fetched_articles: int = 0
+    errors: int = 0
+    by_topic: dict[str, int] = field(default_factory=dict)
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+
+    def add(self, **kwargs) -> None:
+        with self._lock:
+            for k, v in kwargs.items():
+                if k == "by_topic":
+                    for topic, n in v.items():
+                        self.by_topic[topic] = self.by_topic.get(topic, 0) + n
+                else:
+                    setattr(self, k, getattr(self, k) + v)
 
 
-def fields_of(cls):  # tiny shim so we don't need dataclasses.fields import here
-    import dataclasses
-    return dataclasses.fields(cls)
-
+# ---------------------------------------------------------------------------
+# HTTP / parsing helpers
+# ---------------------------------------------------------------------------
 
 def _normalize_content(text: str) -> str:
     text = text.replace("\n", "").replace("\\'", "'")
     return _SENTENCE_SPACE_RE.sub(r"\1 ", text)
 
 
-def _session() -> requests.Session:
+def _new_session() -> requests.Session:
     s = requests.Session()
     s.headers.update({"User-Agent": USER_AGENT})
     return s
@@ -81,38 +109,29 @@ def _session() -> requests.Session:
 def _sleep(base: float, jitter: float = 1.0) -> None:
     if base <= 0:
         return
-    import random
     time.sleep(base + random.random() * jitter)
 
 
-def _archive_articles(soup: BeautifulSoup, topic: str, target_date: date) -> list[str]:
-    """Return article URLs from one archive-page soup that match ``target_date``."""
-    out: list[str] = []
+def _archive_articles(soup: BeautifulSoup, target_date: date) -> list[str]:
     target_str = target_date.strftime("%Y/%m/%d")
+    out: list[str] = []
     for art in soup.find_all("article", attrs={"class": "item"}):
         link = art.find("a")
         if not link:
             continue
         href = link.get("href") or ""
-        if target_str not in href:
-            continue
-        out.append(href)
+        if target_str in href:
+            out.append(href)
     return out
 
 
 def _parse_article(url: str, html: str, topic: str) -> Article | None:
-    """Parse an NPR article page into an :class:`Article`. Returns None if
-    the page doesn't have parseable content (some links are radio shows, ads, etc).
-    """
     soup = BeautifulSoup(html, "html.parser")
-
     title = soup.title.string.strip() if soup.title and soup.title.string else url
 
-    # Modern NPR: authors are in .byline__name elements (article-level).
-    authors = [el.get_text(strip=True) for el in soup.select(".byline__name")]
-    # Dedupe while preserving order.
+    authors_raw = [el.get_text(strip=True) for el in soup.select(".byline__name")]
     seen: dict[str, None] = {}
-    authors = [a for a in authors if a and not (a in seen or seen.setdefault(a, None))]
+    authors = [a for a in authors_raw if a and not (a in seen or seen.setdefault(a, None))]
 
     content_divs = soup.select("div.storytext")
     if not content_divs:
@@ -135,7 +154,6 @@ def _parse_article(url: str, html: str, topic: str) -> Article | None:
         return None
     content = _normalize_content(" ".join(paragraphs))
 
-    # ID derived from URL: /YYYY/MM/DD/<id>/...
     parts = [p for p in url.split("/") if p]
     article_id = ""
     pub_date = ""
@@ -159,77 +177,157 @@ def _parse_article(url: str, html: str, topic: str) -> Article | None:
     )
 
 
-def _topic_year_path(topic: str, year: int) -> Path:
-    return NPR_DIR / topic / f"{year}.json"
+# ---------------------------------------------------------------------------
+# Migration: yearly → per-day, with backup
+# ---------------------------------------------------------------------------
 
+def migrate_yearly_to_daily(verbose: bool = True) -> dict[str, int]:
+    """Split legacy ``<topic>/<year>.json`` files into per-day files.
 
-def _load_topic_year(topic: str, year: int) -> dict[str, dict]:
-    path = _topic_year_path(topic, year)
-    if not path.exists():
-        return {}
-    try:
-        return json.loads(path.read_text())
-    except (json.JSONDecodeError, OSError):
-        return {}
-
-
-def _save_topic_year(topic: str, year: int, payload: dict[str, dict]) -> None:
-    path = _topic_year_path(topic, year)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True))
-
-
-@dataclass
-class NPRScrapeStats:
-    fetched_articles: int = 0
-    skipped_articles: int = 0
-    days_visited: int = 0
-    days_with_no_articles: int = 0
-    errors: int = 0
-    by_topic: dict[str, int] = field(default_factory=dict)
-
-
-def migrate_legacy_npr() -> int:
-    """Move pre-existing ``data/npr/`` payloads into ``data/news/npr/``.
-
-    Renames ``npr-<topic>-article-<year>.json`` to ``<year>.json`` along the
-    way. Idempotent — once the source is empty, the function no-ops. Returns
-    the count of files moved.
+    Yearly originals are moved to ``data/news/_legacy_yearly_backup/npr/`` so
+    nothing is lost. Returns a dict with stats. Idempotent — once the yearly
+    files have moved, subsequent calls no-op.
     """
-    if not LEGACY_NPR_DIR.exists() or LEGACY_NPR_DIR.resolve() == NPR_DIR.resolve():
-        return 0
+    if not NPR_DIR.exists():
+        return {"yearly_files": 0, "days_written": 0, "articles": 0}
 
-    moved = 0
-    rename_re = re.compile(r"^npr-(?P<topic>[^-]+)-article-(?P<year>\d{4})\.json$")
-    for src in LEGACY_NPR_DIR.rglob("*.json"):
-        m = rename_re.match(src.name)
-        if m:
-            topic = m.group("topic")
-            year = m.group("year")
-            dest_name = f"{year}.json"
-        else:
-            topic = src.parent.name
-            dest_name = src.name
-        dest = NPR_DIR / topic / dest_name
-        if dest.exists():
+    # Find legacy yearly files: data/news/npr/<topic>/<year>.json (4-digit name).
+    yearly_files: list[Path] = []
+    for sub in NPR_DIR.iterdir():
+        if not sub.is_dir():
             continue
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(src), str(dest))
-        moved += 1
+        for f in sub.glob("*.json"):
+            if re.fullmatch(r"\d{4}\.json", f.name):
+                yearly_files.append(f)
 
-    # Try to remove now-empty source dirs (best effort)
-    for sub in sorted(LEGACY_NPR_DIR.glob("*"), reverse=True):
-        if sub.is_dir():
+    if not yearly_files:
+        return {"yearly_files": 0, "days_written": 0, "articles": 0}
+
+    if verbose:
+        print(f"Migrating {len(yearly_files)} legacy yearly file(s) to per-day layout...")
+
+    days_written = 0
+    articles_total = 0
+    for yearly in sorted(yearly_files):
+        topic = yearly.parent.name
+        try:
+            payload = json.loads(yearly.read_text())
+        except (json.JSONDecodeError, OSError) as exc:
+            if verbose:
+                print(f"  skip {yearly}: {exc}")
+            continue
+
+        # Group articles by published_date
+        by_day: dict[str, dict[str, dict]] = {}
+        for aid, art in payload.items():
+            pub = art.get("published_date") if isinstance(art, dict) else None
+            if not pub:
+                continue
+            by_day.setdefault(pub, {})[aid] = art
+
+        for day_str, day_articles in by_day.items():
             try:
-                sub.rmdir()
-            except OSError:
-                pass
-    try:
-        LEGACY_NPR_DIR.rmdir()
-    except OSError:
-        pass
+                day = date.fromisoformat(day_str)
+            except ValueError:
+                continue
+            existing = load_day(SOURCE, topic, day) or {}
+            existing.update(day_articles)
+            save_day(SOURCE, topic, day, existing)
+            days_written += 1
+            articles_total += len(day_articles)
 
-    return moved
+        # Move yearly file to backup
+        backup = LEGACY_BACKUP_DIR / topic / yearly.name
+        backup.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(yearly), str(backup))
+
+    if verbose:
+        print(
+            f"  {len(yearly_files)} yearly file(s) split into {days_written:,} day-files "
+            f"({articles_total:,} articles); originals in {LEGACY_BACKUP_DIR}"
+        )
+
+    return {
+        "yearly_files": len(yearly_files),
+        "days_written": days_written,
+        "articles": articles_total,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Scrape one (topic, day)
+# ---------------------------------------------------------------------------
+
+def _scrape_topic_day(
+    topic: str,
+    day: date,
+    session: requests.Session,
+    sleep: float,
+    stats: NPRScrapeStats,
+    verbose: bool,
+) -> None:
+    if day_exists(SOURCE, topic, day):
+        stats.add(days_skipped_cached=1)
+        return
+
+    stats.add(days_visited=1)
+    day_str = day.strftime("%Y-%m-%d")
+
+    try:
+        _sleep(sleep)
+        r = session.get(ARCHIVE_URL.format(topic=topic, date=day_str), timeout=30)
+        r.raise_for_status()
+    except Exception as exc:
+        if verbose:
+            print(f"  [archive fail] {topic} {day_str}: {exc}")
+        stats.add(errors=1)
+        return
+
+    soup = BeautifulSoup(r.content, "html.parser")
+    links = _archive_articles(soup, day)
+    if not links:
+        # Mark day as visited (empty) so we don't re-check.
+        save_day(SOURCE, topic, day, {})
+        stats.add(days_with_no_articles=1)
+        return
+
+    articles: dict[str, dict] = {}
+    for url in links:
+        try:
+            _sleep(sleep)
+            ar = session.get(url, timeout=30)
+            ar.raise_for_status()
+        except Exception as exc:
+            if verbose:
+                print(f"  [article fail] {url}: {exc}")
+            stats.add(errors=1)
+            continue
+        article = _parse_article(url, ar.text, topic)
+        if article is None:
+            continue
+        articles[article.id] = asdict(article)
+
+    save_day(SOURCE, topic, day, articles)
+    if articles:
+        stats.add(fetched_articles=len(articles), by_topic={topic: len(articles)})
+        if verbose:
+            print(f"  + {topic} {day_str}: {len(articles)} article(s)")
+
+
+def _scrape_topic(
+    topic: str,
+    start: date,
+    end: date,
+    sleep: float,
+    stats: NPRScrapeStats,
+    verbose: bool,
+) -> None:
+    """Walk ``[start, end]`` one day at a time for a single topic."""
+    session = _new_session()
+    day = start
+    while day <= end:
+        _scrape_topic_day(topic, day, session, sleep, stats, verbose)
+        day += timedelta(days=1)
 
 
 def scrape(
@@ -237,13 +335,14 @@ def scrape(
     start: date | None = None,
     end: date | None = None,
     sleep: float = 1.0,
+    workers: int = 1,
     verbose: bool = True,
 ) -> NPRScrapeStats:
     """Scrape NPR articles for ``topics`` over ``[start, end]`` inclusive.
 
-    Defaults: all topics, the last 7 days. ``sleep`` is the base seconds between
-    requests (a uniform 0–1 jitter is added on top to look polite). Articles
-    already saved locally are skipped, so re-runs only fetch what's missing.
+    With ``workers > 1``, topics are walked in parallel — each worker has its
+    own session and sleeps independently, so wall-clock backfill scales
+    roughly linearly with the worker count up to the topic count (8).
     """
     topics = topics or list(TOPICS)
     today = date.today()
@@ -253,98 +352,45 @@ def scrape(
         start, end = end, start
 
     stats = NPRScrapeStats()
-    sess = _session()
 
-    # Cache loaded year-files per topic so we don't re-read for every article.
-    loaded: dict[tuple[str, int], dict[str, dict]] = {}
-
-    def get_year(topic: str, year: int) -> dict[str, dict]:
-        key = (topic, year)
-        if key not in loaded:
-            loaded[key] = _load_topic_year(topic, year)
-        return loaded[key]
-
-    try:
+    if workers <= 1:
         for topic in topics:
-            day = start
-            while day <= end:
-                stats.days_visited += 1
-                day_str = day.strftime("%Y-%m-%d")
+            _scrape_topic(topic, start, end, sleep, stats, verbose)
+    else:
+        with ThreadPoolExecutor(max_workers=min(workers, len(topics))) as ex:
+            futures = {
+                ex.submit(_scrape_topic, t, start, end, sleep, stats, verbose): t
+                for t in topics
+            }
+            for fut in as_completed(futures):
+                topic = futures[fut]
                 try:
-                    _sleep(sleep)
-                    r = sess.get(ARCHIVE_URL.format(topic=topic, date=day_str), timeout=30)
-                    r.raise_for_status()
+                    fut.result()
                 except Exception as exc:
                     if verbose:
-                        print(f"  [archive fail] {topic} {day_str}: {exc}")
-                    stats.errors += 1
-                    day += timedelta(days=1)
-                    continue
-
-                soup = BeautifulSoup(r.content, "html.parser")
-                links = _archive_articles(soup, topic, day)
-                if not links:
-                    stats.days_with_no_articles += 1
-                    day += timedelta(days=1)
-                    continue
-
-                year_payload = get_year(topic, day.year)
-                year_dirty = False
-                for url in links:
-                    parts = [p for p in url.split("/") if p]
-                    article_id = None
-                    for i in range(len(parts) - 3):
-                        if parts[i].isdigit() and len(parts[i]) == 4:
-                            article_id = f"{parts[i]}-{parts[i+1]}-{parts[i+2]}-{parts[i+3]}"
-                            break
-                    if article_id and article_id in year_payload:
-                        stats.skipped_articles += 1
-                        continue
-                    try:
-                        _sleep(sleep)
-                        ar = sess.get(url, timeout=30)
-                        ar.raise_for_status()
-                    except Exception as exc:
-                        if verbose:
-                            print(f"  [article fail] {url}: {exc}")
-                        stats.errors += 1
-                        continue
-                    article = _parse_article(url, ar.text, topic)
-                    if article is None:
-                        continue
-                    year_payload[article.id] = asdict(article)
-                    year_dirty = True
-                    stats.fetched_articles += 1
-                    stats.by_topic[topic] = stats.by_topic.get(topic, 0) + 1
-                    if verbose:
-                        print(f"  + {article.id} {article.title[:80]}")
-
-                if year_dirty:
-                    _save_topic_year(topic, day.year, year_payload)
-                day += timedelta(days=1)
-    finally:
-        # Defensive flush of any in-memory year buffers (no-op if nothing dirty).
-        for (topic, year), payload in loaded.items():
-            on_disk = _load_topic_year(topic, year)
-            if len(payload) > len(on_disk):
-                _save_topic_year(topic, year, payload)
+                        print(f"  [worker {topic} crashed] {exc}")
+                    stats.add(errors=1)
 
     return stats
 
 
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
 def _print_summary(stats: NPRScrapeStats, start: date, end: date) -> None:
     print("\n" + "=" * 60)
     print(f"NPR scrape summary  ({start} → {end})")
-    print(f"  days visited        : {stats.days_visited}")
-    print(f"  empty days          : {stats.days_with_no_articles}")
-    print(f"  articles fetched    : {stats.fetched_articles}")
-    print(f"  articles skipped    : {stats.skipped_articles}")
-    print(f"  errors              : {stats.errors}")
+    print(f"  days visited            : {stats.days_visited}")
+    print(f"  days skipped (cached)   : {stats.days_skipped_cached}")
+    print(f"  empty days              : {stats.days_with_no_articles}")
+    print(f"  articles fetched        : {stats.fetched_articles}")
+    print(f"  errors                  : {stats.errors}")
     if stats.by_topic:
-        print("  by topic            :")
+        print("  by topic                :")
         for topic, n in sorted(stats.by_topic.items(), key=lambda kv: -kv[1]):
             print(f"    {topic:14s}: {n}")
-    print(f"  saved to            : {NPR_DIR}")
+    print(f"  saved to                : {NPR_DIR}")
 
 
 def main() -> int:
@@ -353,12 +399,12 @@ def main() -> int:
         "--topics",
         nargs="*",
         choices=TOPICS,
-        help=f"Topics to scrape (default: all). Choices: {', '.join(TOPICS)}.",
+        help=f"Topics (default: all). Choices: {', '.join(TOPICS)}.",
     )
     parser.add_argument(
         "--start",
         type=lambda s: datetime.strptime(s, "%Y-%m-%d").date(),
-        help="Earliest date (default: 7 days ago).",
+        help="Earliest date (default: 7 days ago, or 2000-01-01 with --full).",
     )
     parser.add_argument(
         "--end",
@@ -366,31 +412,40 @@ def main() -> int:
         help="Latest date (default: today).",
     )
     parser.add_argument(
+        "--full",
+        action="store_true",
+        help=f"Backfill from {FULL_BACKFILL_START} to today (slow). Overrides --start.",
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="Parallel topic workers (default 1; backfill goes faster with 4-8).",
+    )
+    parser.add_argument(
         "--sleep",
         type=float,
         default=1.0,
-        help="Base seconds between requests (default 1; 0–1s jitter is added on top).",
+        help="Base seconds between requests per worker (default 1; +0-1s jitter).",
     )
-    parser.add_argument(
-        "--quiet",
-        action="store_true",
-        help="Suppress per-article progress output.",
-    )
+    parser.add_argument("--quiet", action="store_true", help="Suppress per-day output.")
     args = parser.parse_args()
 
-    migrated = migrate_legacy_npr()
-    if migrated:
-        print(f"Migrated {migrated} legacy NPR file(s) into {NPR_DIR}")
+    migration = migrate_yearly_to_daily(verbose=not args.quiet)
 
     today = date.today()
+    if args.full:
+        start = FULL_BACKFILL_START
+    else:
+        start = args.start or (today - timedelta(days=7))
     end = args.end or today
-    start = args.start or (today - timedelta(days=7))
 
     stats = scrape(
         topics=args.topics,
         start=start,
         end=end,
         sleep=args.sleep,
+        workers=args.workers,
         verbose=not args.quiet,
     )
 

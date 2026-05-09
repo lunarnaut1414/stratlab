@@ -15,7 +15,7 @@ import sys
 from datetime import date, timedelta
 
 from stratlab.news.npr import _print_summary as _print_news_summary
-from stratlab.news.npr import migrate_legacy_npr, scrape
+from stratlab.news.npr import migrate_yearly_to_daily, scrape
 from stratlab.refresh import refresh_universe
 
 
@@ -33,9 +33,7 @@ def main() -> int:
     print("=" * 60)
     print("STEP 2 / 2: News scrape")
     print("=" * 60)
-    moved = migrate_legacy_npr()
-    if moved:
-        print(f"Migrated {moved} legacy NPR file(s) into data/news/npr/")
+    migrate_yearly_to_daily(verbose=True)
     news = scrape(start=news_window_start, end=today, verbose=True)
     _print_news_summary(news, news_window_start, today)
     news_ok = news.errors == 0

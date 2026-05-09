@@ -53,9 +53,21 @@ python -m stratlab.refresh --start 2010-01-01
 # News for a specific date range / topic
 python -m stratlab.news.npr --topics economy technology --start 2024-01-01 --end 2024-12-31
 
-# Quiet mode (only summary, no per-article logging)
+# Backfill all of NPR back to 2000 (slow — many hours; use --workers)
+python -m stratlab.news.npr --full --workers 4
+
+# Parallelize across topics (1 session per worker; 4-8 is the sweet spot)
+python -m stratlab.news.npr --workers 4
+
+# Quiet mode (only summary, no per-day logging)
 python -m stratlab.news.npr --quiet
 ```
+
+News storage is one JSON per `(source, topic, day)`:
+`data/news/<source>/<topic>/<YYYY>/<YYYY-MM-DD>.json`. Resume is by file
+existence — if the day file exists (even empty), the scraper skips that day
+without an HTTP request. Legacy year-based files have been backed up to
+`data/news/_legacy_yearly_backup/`.
 
 ---
 
