@@ -236,7 +236,7 @@ def scrape(
     topics: list[str] | None = None,
     start: date | None = None,
     end: date | None = None,
-    sleep: float = 2.0,
+    sleep: float = 1.0,
     verbose: bool = True,
 ) -> NPRScrapeStats:
     """Scrape NPR articles for ``topics`` over ``[start, end]`` inclusive.
@@ -368,8 +368,8 @@ def main() -> int:
     parser.add_argument(
         "--sleep",
         type=float,
-        default=2.0,
-        help="Base seconds between requests (default 2; 0–1s jitter is added).",
+        default=1.0,
+        help="Base seconds between requests (default 1; 0–1s jitter is added on top).",
     )
     parser.add_argument(
         "--quiet",
