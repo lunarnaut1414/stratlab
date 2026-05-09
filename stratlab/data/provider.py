@@ -14,6 +14,11 @@ def _cache_path(symbol: str, interval: str) -> Path:
 
 def _normalize(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
+    # yf.download with group_by="ticker" returns MultiIndex columns like
+    # ("AAPL", "Open"). Flatten by keeping only the field-name level so the
+    # OHLCV filter below works regardless of single- vs multi-ticker shape.
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(-1)
     df.columns = [str(c).lower() for c in df.columns]
     if isinstance(df.index, pd.DatetimeIndex) and df.index.tz is not None:
         df.index = df.index.tz_localize(None)

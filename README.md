@@ -187,14 +187,26 @@ download.
 ```bash
 python -m stratlab.refresh                       # full default universe (~780 tickers)
 python -m stratlab.refresh --tickers AAPL MSFT   # specific tickers
-python -m stratlab.refresh --start 2015-01-01    # backfill more history
+python -m stratlab.refresh --start 2020-01-01    # only fetch from 2020 onward
 ```
 
-The refresh module fetches incrementally: tickers with no cache get the full
-range from `--start` to today, tickers with existing cache get only the gap
-appended. Tickers whose cache already covers the most recent business day are
-skipped without a network call. Final summary reports cold/warm/up-to-date
-counts, new bars added, and total cache size.
+By default `--start` is `1900-01-01` so each ticker gets its full Yahoo history
+on a cold fetch (AAPL → 1980, NVDA → 1999, ABNB → 2020 IPO, etc.). Pass an
+explicit `--start` to truncate.
+
+The refresh module categorizes each ticker into one of four buckets and only
+hits the network where needed:
+
+- **cold** — no cache, fetch full range
+- **backfill** — cache exists but doesn't cover `--start`, re-fetch full range
+- **warm** — cache covers `--start` but stops before the most recent business
+  day, fetch only the gap on the right
+- **up to date** — cache already covers both edges, skipped without a network
+  call
+
+Orphan files from older cache layouts are swept on every run. Final summary
+reports counts per bucket, new bars added, total cache size on disk, and any
+failures.
 
 ## For AI Agents
 
