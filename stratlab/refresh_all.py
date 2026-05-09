@@ -25,6 +25,7 @@ from datetime import date, timedelta
 
 from stratlab.news import ap as ap_news
 from stratlab.news import bbc as bbc_news
+from stratlab.news import cna as cna_news
 from stratlab.news import npr as npr_news
 from stratlab.refresh import refresh_universe
 
@@ -44,6 +45,10 @@ def _run_bbc(verbose: bool):
 
 def _run_ap(verbose: bool):
     return ap_news.scrape(verbose=verbose)
+
+
+def _run_cna(verbose: bool):
+    return cna_news.scrape(verbose=verbose)
 
 
 def _print_step_header(title: str) -> None:
@@ -71,43 +76,54 @@ def main() -> int:
     window_start = today - timedelta(days=7)
     verbose = not args.quiet
     started = time.time()
+    total = 5
 
     if args.serial:
-        _print_step_header("STEP 1 / 4: Market data")
+        _print_step_header(f"STEP 1 / {total}: Market data")
         market = _run_market(verbose=verbose)
-        _print_step_header("STEP 2 / 4: NPR (date-archive)")
+        _print_step_header(f"STEP 2 / {total}: NPR (date-archive)")
         npr_stats = _run_npr(verbose=verbose, window_start=window_start, today=today)
         npr_news._print_summary(npr_stats, window_start, today)
-        _print_step_header("STEP 3 / 4: BBC (RSS)")
+        _print_step_header(f"STEP 3 / {total}: BBC (RSS)")
         bbc_stats = _run_bbc(verbose=verbose)
         bbc_news._print_summary(bbc_stats)
-        _print_step_header("STEP 4 / 4: AP News (topic hubs)")
+        _print_step_header(f"STEP 4 / {total}: AP News (topic hubs)")
         ap_stats = _run_ap(verbose=verbose)
         ap_news._print_summary(ap_stats)
+        _print_step_header(f"STEP 5 / {total}: CNA (Singapore)")
+        cna_stats = _run_cna(verbose=verbose)
+        cna_news._print_summary(cna_stats)
     else:
-        _print_step_header("Running 4 pipelines in parallel (output will interleave)")
-        with ThreadPoolExecutor(max_workers=4) as ex:
+        _print_step_header(
+            f"Running {total} pipelines in parallel (output will interleave)"
+        )
+        with ThreadPoolExecutor(max_workers=total) as ex:
             f_market = ex.submit(_run_market, verbose=verbose)
             f_npr = ex.submit(_run_npr, verbose=verbose,
                               window_start=window_start, today=today)
             f_bbc = ex.submit(_run_bbc, verbose=verbose)
             f_ap = ex.submit(_run_ap, verbose=verbose)
+            f_cna = ex.submit(_run_cna, verbose=verbose)
             market = f_market.result()
             npr_stats = f_npr.result()
             bbc_stats = f_bbc.result()
             ap_stats = f_ap.result()
+            cna_stats = f_cna.result()
 
         # Print summaries cleanly after all threads have joined.
         npr_news._print_summary(npr_stats, window_start, today)
         bbc_news._print_summary(bbc_stats)
         ap_news._print_summary(ap_stats)
+        cna_news._print_summary(cna_stats)
 
     market_ok = not market.failed
     npr_ok = npr_stats.errors == 0
     bbc_ok = bbc_stats.errors == 0
     ap_ok = ap_stats.errors == 0
+    cna_ok = cna_stats.errors == 0
     total_articles = (
-        npr_stats.fetched_articles + bbc_stats.fetched_articles + ap_stats.fetched_articles
+        npr_stats.fetched_articles + bbc_stats.fetched_articles
+        + ap_stats.fetched_articles + cna_stats.fetched_articles
     )
     elapsed = time.time() - started
 
@@ -122,10 +138,12 @@ def main() -> int:
           f"({bbc_stats.errors} errors, {bbc_stats.fetched_articles} articles)")
     print(f"  ap:     {'ok' if ap_ok else 'FAILURES'} "
           f"({ap_stats.errors} errors, {ap_stats.fetched_articles} articles)")
+    print(f"  cna:    {'ok' if cna_ok else 'FAILURES'} "
+          f"({cna_stats.errors} errors, {cna_stats.fetched_articles} articles)")
     print(f"  total news articles fetched: {total_articles}")
     print("=" * 60)
 
-    return 0 if all([market_ok, npr_ok, bbc_ok, ap_ok]) else 1
+    return 0 if all([market_ok, npr_ok, bbc_ok, ap_ok, cna_ok]) else 1
 
 
 if __name__ == "__main__":

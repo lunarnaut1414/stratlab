@@ -43,6 +43,7 @@ python -m stratlab.refresh                    # market only
 python -m stratlab.news.npr                   # NPR only (date-archive walker)
 python -m stratlab.news.bbc                   # BBC only (RSS-driven)
 python -m stratlab.news.ap                    # AP only (topic-hub walker)
+python -m stratlab.news.cna                   # CNA only (Singapore, sitemap-feed)
 ```
 
 Each news source has its own topic vocabulary and own `--topics` choices.
