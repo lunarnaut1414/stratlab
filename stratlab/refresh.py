@@ -73,10 +73,15 @@ MAX_HISTORY_START = _max_history_start()
 
 # yf.download saturates the connection pool when given 800+ tickers at once
 # (DNS resolution failures, dropped responses). Chunk into manageable groups
-# so each batch fits well within macOS / urllib defaults.
-BATCH_CHUNK_SIZE = 100
-INTER_CHUNK_SLEEP = 0.5  # gentle pause between chunks
-MAX_RETRIES = 2          # retry transient failures once before giving up
+# so each batch fits well within macOS / urllib defaults. Large date ranges
+# compound the issue: 50 tickers × 99 years (~1.2M rows) is the sweet spot
+# where Yahoo reliably returns every ticker we asked for.
+BATCH_CHUNK_SIZE = 50
+INTER_CHUNK_SLEEP = 1.0  # gentle pause between chunks
+
+# Per-ticker retry pace: when the bulk endpoint silently drops a ticker, we
+# retry that name alone via yf.Ticker.history(), which is far more reliable.
+PER_TICKER_RETRY_SLEEP = 0.3
 
 
 @dataclass
@@ -407,21 +412,59 @@ def _batch_fetch_and_merge(
         if chunk_idx < len(chunks) - 1:
             time.sleep(INTER_CHUNK_SLEEP)
 
-    # Retry transient failures once.
-    if failures and MAX_RETRIES > 0:
+    # Bulk-batch failures get retried one ticker at a time. The bulk endpoint
+    # silently drops random tickers from large responses; per-ticker requests
+    # are slower but each call gets its own response and rarely fails.
+    if failures:
         if verbose:
-            print(f"  retrying {len(failures)} transient failure(s)...")
+            print(
+                f"  bulk pass dropped {len(failures)} tickers; retrying "
+                "per-ticker (slower, more reliable)..."
+            )
         time.sleep(2.0)
         retry_failures: list[str] = []
-        for chunk in [failures[i:i + BATCH_CHUNK_SIZE] for i in range(0, len(failures), BATCH_CHUNK_SIZE)]:
-            added, fails = _fetch_chunk(chunk, start, end, interval, cached_by_sym, summary)
+        for i, sym in enumerate(failures):
+            added, ok = _fetch_one_ticker(sym, start, end, interval, cached_by_sym, summary)
             new_bars_total += added
-            retry_failures.extend(fails)
+            if not ok:
+                retry_failures.append(sym)
+            if verbose and (i + 1) % 25 == 0:
+                done = i + 1
+                print(f"    [{done}/{len(failures)}] recovered "
+                      f"{done - len(retry_failures)}, still failing {len(retry_failures)}")
+            time.sleep(PER_TICKER_RETRY_SLEEP)
         summary.failed.extend(retry_failures)
-    else:
-        summary.failed.extend(failures)
 
     return new_bars_total
+
+
+def _fetch_one_ticker(
+    symbol: str,
+    start: str,
+    end: str,
+    interval: str,
+    cached_by_sym: dict[str, pd.DataFrame | None],
+    summary: RefreshSummary,
+) -> tuple[int, bool]:
+    """Fetch a single ticker via the dedicated history endpoint.
+
+    yf.Ticker.history() is more reliable than yf.download for individual
+    names — each call gets its own connection and response, with no
+    multi-ticker truncation. Returns ``(bars_added, success)``.
+    """
+    try:
+        raw = yf.Ticker(symbol).history(
+            start=start, end=end, interval=interval, auto_adjust=True
+        )
+    except Exception:
+        return 0, False
+    if raw.empty:
+        return 0, False
+    try:
+        added = _merge_one(symbol, raw, cached_by_sym.get(symbol), interval, summary)
+        return added, True
+    except Exception:
+        return 0, False
 
 
 def _fetch_chunk(
