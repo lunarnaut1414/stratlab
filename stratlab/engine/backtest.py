@@ -31,6 +31,11 @@ class Backtest:
     *tradeable* — orders for not-yet-listed or delisted names are silently
     skipped. Held positions are marked-to-market at the last known close, so
     delisting doesn't vanish a position from the equity curve.
+
+    Execution timing: orders submitted by ``on_bar`` on bar ``i`` are filled at
+    bar ``i+1``'s open (with slippage). This prevents the look-ahead bias of
+    deciding on a close and filling at that same close. Orders submitted on the
+    final bar are dropped — surfaced as ``dropped_orders`` in the metrics dict.
     """
 
     data: dict[str, pd.DataFrame]
@@ -64,6 +69,8 @@ class Backtest:
         n_bars = len(common_index)
         equity = np.zeros(n_bars)
         last_close: dict[str, float] = {sym: 0.0 for sym in aligned}
+        pending: list = []
+        dropped_orders = 0
 
         self.strategy.on_start()
 
@@ -71,6 +78,18 @@ class Backtest:
             bar_closes = closes_df.iloc[i]
             tradeable_mask = bar_closes.notna()
             tradeable = bar_closes.index[tradeable_mask].tolist()
+
+            # Fill orders submitted on the previous bar at THIS bar's open.
+            for order in pending:
+                if order.symbol not in aligned:
+                    dropped_orders += 1
+                    continue
+                bar = aligned[order.symbol].iloc[i]
+                if pd.isna(bar.get("open")):
+                    dropped_orders += 1
+                    continue
+                self.broker.fill_order(order, bar, common_index[i], price_col="open")
+            pending = []
 
             for sym in tradeable:
                 last_close[sym] = float(bar_closes[sym])
@@ -89,14 +108,18 @@ class Backtest:
             for order in orders:
                 if not order.symbol:
                     if not tradeable:
+                        dropped_orders += 1
                         continue
                     order.symbol = tradeable[0]
-                if order.symbol not in aligned or pd.isna(closes_df.iloc[i][order.symbol]):
+                if order.symbol not in aligned:
+                    dropped_orders += 1
                     continue
-                bar = aligned[order.symbol].iloc[i]
-                self.broker.fill_order(order, bar, common_index[i])
+                pending.append(order)
 
             equity[i] = self.broker.portfolio_value(last_close)
+
+        # Orders queued on the final bar can never fill — count and drop.
+        dropped_orders += len(pending)
 
         self.strategy.on_end()
 
@@ -104,6 +127,7 @@ class Backtest:
         returns = equity_series.pct_change().fillna(0.0)
         metrics = compute_metrics(equity_series, returns)
         metrics["n_trades"] = len(self.broker.fills)
+        metrics["dropped_orders"] = dropped_orders
 
         return BacktestResult(
             equity_curve=equity_series,

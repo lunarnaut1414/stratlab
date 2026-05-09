@@ -145,6 +145,13 @@ The simulated broker models:
 - **Position tracking** — average entry price, size
 - **Cash management** — rejects orders that exceed available cash
 
+## Execution timing
+
+Orders submitted by `on_bar` on bar `i` are filled at bar `i+1`'s open with
+slippage applied — you can't decide on a close and fill at that close. Orders
+submitted on the final bar are dropped and surfaced as `dropped_orders` in the
+metrics dict. Held positions are marked-to-market at each bar's close.
+
 ## Data
 
 Market data is fetched via yfinance and cached as CSV files in `~/.stratlab/cache/`. Pass `use_cache=False` to `load_bars()` to force a fresh download.

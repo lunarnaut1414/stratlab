@@ -59,8 +59,14 @@ class Broker:
             self.positions[symbol] = Position(symbol=symbol)
         return self.positions[symbol]
 
-    def fill_order(self, order: Order, bar: pd.Series, timestamp: pd.Timestamp) -> Fill | None:
-        price = float(bar["close"])
+    def fill_order(
+        self,
+        order: Order,
+        bar: pd.Series,
+        timestamp: pd.Timestamp,
+        price_col: str = "close",
+    ) -> Fill | None:
+        price = float(bar[price_col])
 
         if order.side == OrderSide.BUY:
             price *= 1 + self.slippage_pct
