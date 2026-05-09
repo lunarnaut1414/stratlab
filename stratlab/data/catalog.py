@@ -21,11 +21,13 @@ import pandas as pd
 import requests
 
 from stratlab.data._etf_lists import ETF_CATEGORIES, etf_category_map
+from stratlab.data._futures_lists import FUTURES_CATEGORIES, futures_category_map
+from stratlab.data._index_lists import INDEX_CATEGORIES, index_category_map
 
 _USER_AGENT = "stratlab/0.1 (https://github.com/lunarnaut1414/stratlab) python-requests"
 SP500_WIKI_URL = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
 
-CATALOG_VERSION = 1
+CATALOG_VERSION = 2
 UNCATEGORIZED = "uncategorized"
 
 
@@ -65,25 +67,31 @@ def scrape_sp500_sectors() -> dict[str, str]:
 
 
 def build_catalog() -> dict:
-    """Assemble the full catalog dict from Wikipedia + ETF lists.
+    """Assemble the full catalog dict from Wikipedia + curated lists.
 
     Structure::
 
         {
-          "version": 1,
+          "version": 2,
           "generated_at": "<isoformat>",
-          "stocks": {"AAPL": {"sector": "information_technology"}, ...},
-          "etfs":   {"SPY": {"category": "broad_market"}, ...},
+          "stocks":   {"AAPL":    {"sector":   "information_technology"}, ...},
+          "etfs":     {"SPY":     {"category": "broad_market"}, ...},
+          "indices":  {"^VIX":    {"category": "volatility"}, ...},
+          "futures":  {"CL=F":    {"category": "energy"}, ...},
         }
     """
     stock_sectors = scrape_sp500_sectors()
     etf_map = etf_category_map()
+    index_map = index_category_map()
+    futures_map = futures_category_map()
 
     return {
         "version": CATALOG_VERSION,
         "generated_at": datetime.now().isoformat(),
         "stocks": {ticker: {"sector": sector} for ticker, sector in stock_sectors.items()},
         "etfs": {ticker: {"category": cat} for ticker, cat in etf_map.items()},
+        "indices": {ticker: {"category": cat} for ticker, cat in index_map.items()},
+        "futures": {ticker: {"category": cat} for ticker, cat in futures_map.items()},
     }
 
 
@@ -106,8 +114,10 @@ def category_for(ticker: str, catalog: dict | None) -> str:
 
     Returns one of:
 
-    - ``"stocks/<sector_slug>"`` if the ticker is a known stock
-    - ``"etfs/<category>"`` if the ticker is a known ETF
+    - ``"stocks/<sector_slug>"`` (S&P 500 constituents)
+    - ``"etfs/<category>"`` (curated ETF list)
+    - ``"indices/<category>"`` (curated index list — VIX, SPX, etc.)
+    - ``"futures/<category>"`` (curated continuous futures)
     - ``"uncategorized"`` otherwise
 
     The catalog is queried in-memory; pass ``None`` to disable lookups (useful
@@ -124,9 +134,25 @@ def category_for(ticker: str, catalog: dict | None) -> str:
     if etf and etf.get("category"):
         return f"etfs/{etf['category']}"
 
+    idx = catalog.get("indices", {}).get(ticker)
+    if idx and idx.get("category"):
+        return f"indices/{idx['category']}"
+
+    fut = catalog.get("futures", {}).get(ticker)
+    if fut and fut.get("category"):
+        return f"futures/{fut['category']}"
+
     return UNCATEGORIZED
 
 
 def all_etf_categories() -> list[str]:
     """Names of every ETF category in the curated lists."""
     return list(ETF_CATEGORIES.keys())
+
+
+def all_index_categories() -> list[str]:
+    return list(INDEX_CATEGORIES.keys())
+
+
+def all_futures_categories() -> list[str]:
+    return list(FUTURES_CATEGORIES.keys())

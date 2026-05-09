@@ -188,28 +188,40 @@ project (detected via `pyproject.toml` or `.git`); otherwise it falls back to
 data/market/
   catalog.json                  # ticker → sector/category map (auto-built)
   indices/
-    sp500.json                  # current basket from SSGA SPY holdings
-    nasdaq100.json              # scraped from Wikipedia
-    dow30.json
-  stocks/
+    sp500.json, nasdaq100.json, dow30.json    # ticker lists (constituents)
+    volatility/^VIX_1d.csv, ^VVIX_1d.csv, ^MOVE_1d.csv, ^SKEW_1d.csv, ...
+    equity/^GSPC_1d.csv, ^DJI_1d.csv, ^NDX_1d.csv, ^IXIC_1d.csv, ...
+    international/^FTSE_1d.csv, ^N225_1d.csv, ^HSI_1d.csv, ...
+    rates/^IRX_1d.csv, ^FVX_1d.csv, ^TNX_1d.csv, ^TYX_1d.csv
+    currency/DX-Y.NYB_1d.csv
+  stocks/                       # 11 GICS sectors
     information_technology/AAPL_1d.csv
     financials/JPM_1d.csv
     energy/XOM_1d.csv
-    ... (11 GICS sectors)
-  etfs/
-    broad_market/SPY_1d.csv
-    sector/XLF_1d.csv
-    leveraged/TQQQ_1d.csv
-    inverse/SH_1d.csv
-    bonds/TLT_1d.csv
-    ... (broad_market, factor, sector, industry, thematic, international_developed,
-         international_emerging, bonds, commodities, real_estate, currency,
-         volatility, crypto, leveraged, inverse)
+    ...
+  etfs/                         # 15 categories
+    broad_market/, factor/, sector/, industry/, thematic/,
+    international_developed/, international_emerging/,
+    bonds/, commodities/, real_estate/, currency/, volatility/,
+    crypto/, leveraged/, inverse/
+  futures/                      # continuous contracts (Yahoo `=F`)
+    energy/CL=F_1d.csv, NG=F_1d.csv, BZ=F_1d.csv, ...
+    metals/GC=F_1d.csv, SI=F_1d.csv, HG=F_1d.csv, ...
+    grains/, softs/, meats/, lumber/
+    equity_index/ES=F_1d.csv, NQ=F_1d.csv, ...
+    rates/ZB=F_1d.csv, ZN=F_1d.csv, ...
+    currency/6E=F_1d.csv, 6J=F_1d.csv, ...
+    crypto/BTC=F_1d.csv, ETH=F_1d.csv
   uncategorized/                # tickers not in the catalog
 ```
 
-`catalog.json` is the authoritative ticker → category map. Inspect it to see
-what we know about each symbol.
+`catalog.json` is the authoritative ticker → category map (~810 entries:
+~503 stocks + ~270 ETFs + ~32 indices + ~46 futures). Inspect it to see what
+we know about each symbol.
+
+Volatility indices (`^VIX`, `^VVIX`, `^MOVE`, …) are *index levels*, not
+ETP wrappers. They have no daily-rebalance decay so they're cleaner inputs
+than VXX/UVXY for vol-aware strategies.
 
 ### Refresh the local cache
 

@@ -109,14 +109,43 @@ def _normalize(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _read_cache(path: Path) -> pd.DataFrame | None:
+    """Read a cached OHLCV CSV, tolerant of capitalized/legacy column names.
+
+    Files we write use lowercase ``date`` index and OHLCV columns. But we also
+    absorb yfinance-raw CSVs (``Date,Open,High,Low,Close,Adj Close,Volume``)
+    when migrating user-provided files into the cache, so this reader accepts
+    capitalized headers and folds ``Adj Close`` into ``close``.
+    """
     if not path.exists():
         return None
-    df = pd.read_csv(path, index_col="date", parse_dates=["date"])
+    try:
+        df = pd.read_csv(path)
+    except Exception:
+        return None
+    if df.empty:
+        return None
+    # Locate a date-like column (Date / date / Datetime / Timestamp / ...)
+    date_col = next((c for c in df.columns if str(c).lower() in ("date", "datetime", "timestamp", "time")), None)
+    if date_col is None:
+        return None
+    df = df.set_index(date_col)
+    df.index = pd.to_datetime(df.index, errors="coerce")
+    df = df[df.index.notna()]
     if df.empty:
         return None
     if isinstance(df.index, pd.DatetimeIndex) and df.index.tz is not None:
         df.index = df.index.tz_localize(None)
-    return df
+    df.index.name = "date"
+    df.columns = [str(c).lower() for c in df.columns]
+    # Prefer "adj close" (split/dividend adjusted) when both are present.
+    if "adj close" in df.columns:
+        if "close" in df.columns:
+            df = df.drop(columns=["close"])
+        df = df.rename(columns={"adj close": "close"})
+    cols = [c for c in ["open", "high", "low", "close", "volume"] if c in df.columns]
+    if not cols:
+        return None
+    return df[cols]
 
 
 def _write_cache(df: pd.DataFrame, path: Path) -> None:

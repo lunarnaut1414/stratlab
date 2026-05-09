@@ -109,91 +109,152 @@ def cleanup_orphan_cache_files(cache_dir: Path = MARKET_DIR) -> int:
     return removed
 
 
-def migrate_legacy_cache(verbose: bool = True) -> int:
-    """Move files from ``~/.stratlab/cache/`` into the categorized ``MARKET_DIR``.
+_NAME_RE = re.compile(r"^(?P<sym>.+?)(?:_(?P<intv>1d|1h|5m|15m|30m|1m|1wk|1mo))?\.csv$")
+# Subfolders directly under MARKET_DIR that count as "categorized" — files
+# inside them at the right depth are considered already placed.
+_TOP_LEVEL_BUCKETS = (
+    "stocks", "etfs", "indices", "futures", "forex", "crypto", "uncategorized",
+)
 
-    Idempotent — once the legacy location is empty the function no-ops. Files
-    that already exist at the destination are skipped (the merge-on-fetch logic
-    will reconcile them next time refresh runs). Returns the count of files
-    moved (0 if nothing to migrate).
+
+def refresh_catalog(verbose: bool = True) -> dict | None:
+    """Force-rebuild the catalog, regardless of version. Returns the new dict."""
+    return _ensure_catalog(verbose=verbose, force_rebuild=True)
+
+
+def _ensure_catalog(verbose: bool = True, force_rebuild: bool = False) -> dict | None:
+    """Load the catalog, rebuilding when missing or below the current version.
+
+    Version bumps mean we've added asset classes (indices, futures, …) to the
+    schema. A stale catalog routes new symbols to ``uncategorized/`` even
+    though they have a proper home now, so we proactively rebuild on bumps.
     """
-    if MARKET_DIR.resolve() == LEGACY_HOME_CACHE.resolve():
-        return 0
-    if not LEGACY_HOME_CACHE.exists():
-        return 0
-
-    legacy_csvs = list(LEGACY_HOME_CACHE.glob("*.csv"))
-    legacy_jsons = list(LEGACY_HOME_CACHE.glob("*.json"))
-    if not legacy_csvs and not legacy_jsons:
-        return 0
-
+    catalog = None if force_rebuild else load_catalog(CATALOG_PATH)
+    needs_rebuild = catalog is None or catalog.get("version", 0) < CATALOG_VERSION
+    if not needs_rebuild:
+        return catalog
     if verbose:
-        print(f"Migrating legacy cache: {LEGACY_HOME_CACHE} → {MARKET_DIR}")
+        action = "Building" if catalog is None else f"Upgrading from v{catalog.get('version', 0)}"
+        print(f"{action} catalog to v{CATALOG_VERSION}...")
+    try:
+        catalog = build_catalog()
+        save_catalog(catalog, CATALOG_PATH)
+        _invalidate_catalog_cache()
+    except Exception as exc:
+        if verbose:
+            print(f"  Warning: catalog build failed ({exc!r})")
+        return catalog
+    if verbose:
+        n_stocks = len(catalog.get("stocks", {}))
+        n_etfs = len(catalog.get("etfs", {}))
+        n_indices = len(catalog.get("indices", {}))
+        n_futures = len(catalog.get("futures", {}))
+        print(
+            f"Catalog: {n_stocks} stocks · {n_etfs} ETFs · "
+            f"{n_indices} indices · {n_futures} futures"
+        )
+    return catalog
 
-    # Make sure we have a catalog so we know where each ticker goes.
-    catalog = load_catalog(CATALOG_PATH)
-    if catalog is None:
-        try:
-            catalog = build_catalog()
-            save_catalog(catalog, CATALOG_PATH)
-            _invalidate_catalog_cache()
-        except Exception as exc:
-            if verbose:
-                print(f"  Warning: catalog build failed ({exc!r}); using uncategorized")
-            catalog = None
 
+def _route(symbol: str, original_name: str, catalog: dict | None) -> Path:
+    """Where a CSV with this ticker should live in the new layout.
+
+    Adds an ``_1d`` interval suffix if the source filename had none, so we end
+    up with consistent ``<TICKER>_1d.csv`` names everywhere.
+    """
+    category = category_for(symbol, catalog) if catalog else UNCATEGORIZED
+    name = original_name
+    if not re.search(r"_\w+\.csv$", name):
+        name = f"{symbol}_1d.csv"
+    return MARKET_DIR / category / name
+
+
+def migrate_legacy_cache(verbose: bool = True) -> int:
+    """Reorganize cache files into the categorized layout.
+
+    Three sources are reconciled:
+
+    1. ``~/.stratlab/cache/*.csv`` — the pre-restructure global cache.
+    2. ``MARKET_DIR/<TICKER>.csv`` — naked CSVs at the data root.
+    3. ``MARKET_DIR/{etfs,indices,...}/<TICKER>.csv`` — files placed in a
+       top-level bucket but not in the right sub-category.
+
+    Files already correctly nested are left alone. Files whose destination
+    already exists are skipped (a future refresh will merge if the user wants).
+    """
+    catalog = _ensure_catalog(verbose=verbose)
     moved = 0
     skipped = 0
-    name_re = re.compile(r"^(?P<sym>.+)_(?P<intv>\w+)\.csv$")
-    for src in legacy_csvs:
-        m = name_re.match(src.name)
+
+    def relocate(src: Path) -> None:
+        nonlocal moved, skipped
+        m = _NAME_RE.match(src.name)
         if not m:
-            continue
+            return
         symbol = m.group("sym")
-        category = category_for(symbol, catalog) if catalog else UNCATEGORIZED
-        dest = MARKET_DIR / category / src.name
+        dest = _route(symbol, src.name, catalog)
+        if dest.resolve() == src.resolve():
+            return  # already in the right place
         if dest.exists():
-            skipped += 1
-            continue
+            # Merge bars from src into dest, then drop src. Handles the
+            # legacy case where the same ticker has files in both
+            # uncategorized/ and the correct subfolder.
+            try:
+                existing = _read_cache(dest)
+                incoming = _read_cache(src)
+                if incoming is None:
+                    src.unlink()
+                else:
+                    merged_df = _merge_cache(existing, incoming)
+                    _write_cache(merged_df, dest)
+                    src.unlink()
+                moved += 1
+            except Exception:
+                skipped += 1
+            return
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(src), str(dest))
         moved += 1
 
-    # JSON index files: ~/.stratlab/cache/sp500_tickers.json → indices/sp500.json
-    INDICES_DIR.mkdir(parents=True, exist_ok=True)
-    for src in legacy_jsons:
-        new_name = src.name.replace("_tickers", "")
-        dest = INDICES_DIR / new_name
-        if dest.exists():
-            skipped += 1
+    # 1) legacy ~/.stratlab/cache/
+    if LEGACY_HOME_CACHE.exists() and MARKET_DIR.resolve() != LEGACY_HOME_CACHE.resolve():
+        if verbose:
+            legacy_csvs = list(LEGACY_HOME_CACHE.glob("*.csv"))
+            if legacy_csvs:
+                print(f"Migrating legacy cache: {LEGACY_HOME_CACHE} → {MARKET_DIR}")
+        for src in LEGACY_HOME_CACHE.glob("*.csv"):
+            relocate(src)
+        # JSON index files in the legacy cache: sp500_tickers.json → indices/sp500.json
+        INDICES_DIR.mkdir(parents=True, exist_ok=True)
+        for src in LEGACY_HOME_CACHE.glob("*.json"):
+            dest = INDICES_DIR / src.name.replace("_tickers", "")
+            if dest.exists():
+                skipped += 1
+                continue
+            shutil.move(str(src), str(dest))
+            moved += 1
+
+    # 2) naked CSVs at the MARKET_DIR root
+    if MARKET_DIR.exists():
+        for src in MARKET_DIR.glob("*.csv"):
+            relocate(src)
+
+    # 3) misplaced files inside a top-level bucket (e.g. data/market/etfs/GLD.csv
+    #    rather than data/market/etfs/commodities/GLD.csv)
+    for bucket in _TOP_LEVEL_BUCKETS:
+        bucket_dir = MARKET_DIR / bucket
+        if not bucket_dir.exists():
             continue
-        shutil.move(str(src), str(dest))
-        moved += 1
+        for src in bucket_dir.glob("*.csv"):
+            relocate(src)
 
     if verbose and moved:
-        msg = f"  moved {moved} file(s)"
+        msg = f"  moved {moved} file(s) into categorized layout"
         if skipped:
             msg += f", skipped {skipped} (destination already exists)"
         print(msg)
 
     return moved
-
-
-def refresh_catalog(verbose: bool = True) -> dict | None:
-    """Rebuild ``catalog.json`` from current sources and invalidate caches."""
-    try:
-        catalog = build_catalog()
-    except Exception as exc:
-        if verbose:
-            print(f"  Warning: catalog rebuild failed ({exc!r})")
-        return None
-    save_catalog(catalog, CATALOG_PATH)
-    _invalidate_catalog_cache()
-    if verbose:
-        n_stocks = len(catalog.get("stocks", {}))
-        n_etfs = len(catalog.get("etfs", {}))
-        print(f"Catalog: {n_stocks} stocks (by GICS sector) + {n_etfs} ETFs (by category)")
-    return catalog
 
 
 def refresh_universe(
@@ -225,13 +286,13 @@ def refresh_universe(
     summary = RefreshSummary()
 
     # One-time housekeeping on every run (idempotent after first):
-    # 1. Migrate legacy ~/.stratlab/cache/ files into the categorized layout.
-    # 2. Refresh the catalog so new tickers/sector changes are reflected.
+    # 1. Make sure the catalog is current — rebuild on schema bumps.
+    # 2. Migrate any files placed under the wrong path into the right subfolder.
     # 3. Sweep orphan files from the pre-refactor hash-keyed layout.
+    _ensure_catalog(verbose=verbose)
+
     migrated = migrate_legacy_cache(verbose=verbose)
     summary.migrated_files = migrated
-
-    refresh_catalog(verbose=verbose)
 
     orphans = cleanup_orphan_cache_files(MARKET_DIR)
     summary.orphans_removed = orphans

@@ -11,6 +11,8 @@ import requests
 import yfinance as yf
 
 from stratlab.data._etf_lists import INVERSE_ETFS, LEVERAGED_ETFS, POPULAR_ETFS
+from stratlab.data._futures_lists import FUTURES_CATEGORIES
+from stratlab.data._index_lists import INDEX_CATEGORIES
 from stratlab.data.provider import (
     CACHE_DIR,
     INDICES_DIR,
@@ -206,7 +208,7 @@ def dow30_tickers(use_cache: bool = True, max_age_days: int = 7) -> list[str]:
 
 
 def popular_etfs() -> list[str]:
-    """~150 broadly-traded ETFs covering equity, bonds, commodities, REITs,
+    """~200 broadly-traded ETFs covering equity, bonds, commodities, REITs,
     currency, factor, thematic, crypto, and volatility. Long-side, unlevered."""
     return list(POPULAR_ETFS)
 
@@ -218,9 +220,72 @@ def inverse_etfs() -> list[str]:
 
 
 def leveraged_etfs() -> list[str]:
-    """~25 leveraged long ETFs (2x, 3x). Daily-rebalanced — multi-day holds
+    """~35 leveraged long ETFs (2x, 3x). Daily-rebalanced — multi-day holds
     drift from a simple multiple due to volatility decay."""
     return list(LEVERAGED_ETFS)
+
+
+def _flat(mapping: dict[str, list[str]], *categories: str) -> list[str]:
+    seen: dict[str, None] = {}
+    cats = categories or tuple(mapping.keys())
+    for cat in cats:
+        for t in mapping.get(cat, []):
+            if t not in seen:
+                seen[t] = None
+    return list(seen.keys())
+
+
+def volatility_indices() -> list[str]:
+    """VIX, VVIX, MOVE, SKEW, OVX, GVZ, EVZ, plus VIX9D/3M/6M term structure.
+
+    Index *levels* — no ETF-style decay, useful as direct inputs.
+    """
+    return list(INDEX_CATEGORIES["volatility"])
+
+
+def equity_indices() -> list[str]:
+    """US equity index levels: ^GSPC, ^DJI, ^NDX, ^IXIC, ^RUT, ^MID, ^SML."""
+    return list(INDEX_CATEGORIES["equity"])
+
+
+def international_indices() -> list[str]:
+    """International equity index levels: ^FTSE, ^N225, ^HSI, ^GDAXI, etc."""
+    return list(INDEX_CATEGORIES["international"])
+
+
+def rate_indices() -> list[str]:
+    """Treasury yield indices: ^IRX (3mo), ^FVX (5y), ^TNX (10y), ^TYX (30y)."""
+    return list(INDEX_CATEGORIES["rates"])
+
+
+def all_indices() -> list[str]:
+    """Every index across all categories (vol + equity + intl + rates + currency)."""
+    return _flat(INDEX_CATEGORIES)
+
+
+def commodity_futures() -> list[str]:
+    """Continuous contracts for energy, metals, grains, softs, meats, lumber."""
+    return _flat(FUTURES_CATEGORIES, "energy", "metals", "grains", "softs", "meats", "lumber")
+
+
+def equity_index_futures() -> list[str]:
+    """E-mini and Micro E-mini equity index futures (ES, NQ, YM, RTY, MES, MNQ)."""
+    return list(FUTURES_CATEGORIES["equity_index"])
+
+
+def rate_futures() -> list[str]:
+    """Treasury futures and Fed Funds (ZB, ZN, ZF, ZT, ZQ)."""
+    return list(FUTURES_CATEGORIES["rates"])
+
+
+def currency_futures() -> list[str]:
+    """CME currency futures (6E, 6J, 6B, 6S, 6C, 6A, 6N, 6M)."""
+    return list(FUTURES_CATEGORIES["currency"])
+
+
+def all_futures() -> list[str]:
+    """Every futures contract across all categories."""
+    return _flat(FUTURES_CATEGORIES)
 
 
 def default_universe(
@@ -230,11 +295,14 @@ def default_universe(
     include_etfs: bool = True,
     include_inverse: bool = True,
     include_leveraged: bool = True,
+    include_indices: bool = True,
+    include_futures: bool = True,
 ) -> list[str]:
-    """Combined deduped universe of indexes + curated ETF lists.
+    """Combined deduped universe across asset classes.
 
-    Defaults to *everything* — roughly 700 tickers. Toggle the flags to scope
-    down. Order is preserved so the result is reproducible across runs.
+    Defaults to *everything* — roughly 850 tickers. Toggle the flags to scope
+    down (e.g. ``include_futures=False`` for a stocks-only universe). Order is
+    preserved so the result is reproducible across runs.
     """
     seen: dict[str, None] = {}
     parts: list[list[str]] = []
@@ -250,6 +318,10 @@ def default_universe(
         parts.append(inverse_etfs())
     if include_leveraged:
         parts.append(leveraged_etfs())
+    if include_indices:
+        parts.append(all_indices())
+    if include_futures:
+        parts.append(all_futures())
 
     for chunk in parts:
         for t in chunk:
