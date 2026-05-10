@@ -171,6 +171,115 @@ ETF_CATEGORIES: dict[str, list[str]] = {
         "AGQ",                                 # silver 2x
         "UGL",                                 # gold 2x
     ],
+    "single_stock_leveraged": [
+        # Daily-resetting leveraged & inverse single-stock ETFs from
+        # Direxion, GraniteShares, and REX Shares (T-REX). Most pair a Bull
+        # 2X with a Bear -1X or -2X on the same underlying. As with all
+        # daily-leveraged products, multi-day holds drift from the simple
+        # multiple due to volatility decay — useful for short-horizon
+        # tactical timing or hedging, not buy-and-hold.
+        # ── Direxion Daily Bull 2X / Bear -1X ──
+        "AAPU", "AAPD",                        # AAPL
+        "ADBU",                                # ADBE bull
+        "AMUU", "AMDD",                        # AMD
+        "AMZU", "AMZD",                        # AMZN
+        "ASMU",                                # ASML bull
+        "AVL",  "AVS",                         # AVGO
+        "BABU",                                # BABA bull
+        "BOEU",                                # BA bull
+        "BRKU",                                # BRK.B bull
+        "CONX",                                # COIN bull (Direxion)
+        "CSCL", "CSCS",                        # CSCO
+        "ELIL",                                # LLY bull
+        "GGLL", "GGLS",                        # GOOGL
+        "HODU",                                # HOOD bull (Direxion)
+        "LINT",                                # INTC bull (Direxion)
+        "LMTL",                                # LMT bull
+        "MRVU",                                # MRVL bull (Direxion)
+        "METU", "METD",                        # META
+        "MUU",  "MUD",                         # MU (Direxion)
+        "MSFU", "MSFD",                        # MSFT (Direxion)
+        "NVDU", "NVDD",                        # NVDA (Direxion)
+        "NFXL", "NFXS",                        # NFLX
+        "ORCU", "ORCS",                        # ORCL
+        "PLTU", "PLTD",                        # PLTR (Direxion)
+        "PALU", "PALD",                        # PANW
+        "PYPU",                                # PYPL bull
+        "QCMU", "QCMD",                        # QCOM (Direxion)
+        "SHPU",                                # SHOP bull
+        "SOFA",                                # SOFI bull
+        "TSMX", "TSMZ",                        # TSM (Direxion)
+        "TXNU",                                # TXN bull
+        "TSLL", "TSLS",                        # TSLA (Direxion)
+        "UNHU",                                # UNH bull
+        "XOMX",                                # XOM bull
+        # ── GraniteShares 2x Long / 2x Short ──
+        "TSLR", "TSDD",                        # TSLA (GraniteShares)
+        "TSL",                                 # TSLA 1.25x
+        "AAPB",                                # AAPL bull (GS)
+        "AMDL",                                # AMD bull (GS)
+        "AMZZ",                                # AMZN bull (GS)
+        "AVGU",                                # AVGO bull (GS)
+        "BABX",                                # BABA bull (GS)
+        "BULX",                                # BULL bull
+        "CONL", "CONI",                        # COIN (GS, paired)
+        "CRWL",                                # CRWD bull (GS)
+        "DLLL",                                # DELL bull
+        "ETRL",                                # ETOR bull
+        "GOU",                                 # GOOGL bull (GS)
+        "INTW",                                # INTC bull (GS)
+        "IONL",                                # IONQ bull
+        "ISUL",                                # ISRG bull
+        "LCDL",                                # LCID bull
+        "MRAL",                                # MARA bull
+        "FBL",                                 # META bull (GS)
+        "MVLL",                                # MRVL bull (GS)
+        "MSFL",                                # MSFT bull (GS)
+        "MSTP", "MSDD",                        # MSTR (GS, paired)
+        "MULL",                                # MU bull (GS)
+        "NBIL",                                # NBIS bull
+        "NOWL",                                # NOW bull
+        "NVDL", "NVD",                         # NVDA (GS, paired)
+        "PDDL",                                # PDD bull
+        "PTIR",                                # PLTR bull (GS)
+        "QCML",                                # QCOM bull (GS)
+        "RDTL",                                # RDDT bull
+        "RVNL",                                # RIVN bull
+        "SMCL",                                # SMCI bull
+        "TSMU",                                # TSM bull (GS)
+        "UBRL",                                # UBER bull
+        "VRTL",                                # VRT bull
+        # ── REX Shares T-REX 2X / -2X ──
+        "MSTU", "MSTZ",                        # MSTR (T-Rex)
+        "NVDX", "NVDQ",                        # NVDA (T-Rex)
+        "TSLT", "TSLZ",                        # TSLA (T-Rex)
+        "CRWU", "CORD",                        # CRWV
+        "CCUP", "CRCD",                        # CRCL
+        "ROBN",                                # HOOD bull (T-Rex)
+        "NFLU",                                # NFLX bull (T-Rex)
+        "GMEU",                                # GME bull
+        "DJTU",                                # DJT bull
+        "AAPX",                                # AAPL bull (T-Rex)
+        "GOOX",                                # GOOG bull
+        "MSFX",                                # MSFT bull (T-Rex)
+        "RBLU",                                # RBLX bull
+        "BMNU",                                # BMNR bull
+        "GLXU",                                # GLXY bull
+        "TTDU",                                # TTD bull
+        "KTUP",                                # KTOS bull
+        "SMUP",                                # SMR bull
+        "AFRU",                                # AFRM bull
+        "SNOU",                                # SNOW bull
+        "SBTU",                                # SBET bull
+        "CIFU",                                # CIFR bull
+        "EOSU",                                # EOSE bull
+        "RDWU",                                # RDW bull
+        "FGRU",                                # FIGR bull
+        "APHU",                                # APH bull
+        "PAAU",                                # PAAS bull
+        "SNDU",                                # SNDK bull
+        "AXTU",                                # AXTI bull
+    ],
 }
 
 
@@ -193,6 +302,7 @@ POPULAR_ETFS: list[str] = _flat(
 )
 INVERSE_ETFS: list[str] = ETF_CATEGORIES["inverse"]
 LEVERAGED_ETFS: list[str] = ETF_CATEGORIES["leveraged"]
+SINGLE_STOCK_LEVERAGED_ETFS: list[str] = ETF_CATEGORIES["single_stock_leveraged"]
 
 
 def etf_category_map() -> dict[str, str]:

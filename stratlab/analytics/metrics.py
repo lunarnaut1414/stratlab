@@ -51,3 +51,68 @@ def compute_metrics(
         "win_rate": round(win_rate, 4),
         "n_trades": 0,
     }
+
+
+def _calmar_from_equity(equity: pd.Series, periods_per_year: int = 252) -> float:
+    """Calmar from a sliced equity curve. Assumes equity is positive throughout."""
+    if len(equity) < 2 or equity.iloc[0] <= 0:
+        return 0.0
+    n_years = len(equity) / periods_per_year
+    if n_years <= 0:
+        return 0.0
+    cagr = (equity.iloc[-1] / equity.iloc[0]) ** (1 / n_years) - 1.0
+    cummax = equity.cummax()
+    drawdown = (equity - cummax) / cummax
+    max_dd = float(drawdown.min())
+    return float(abs(cagr / max_dd)) if max_dd != 0 else 0.0
+
+
+def compute_subperiod_metrics(
+    equity: pd.Series,
+    returns: pd.Series,
+    periods_per_year: int = 252,
+) -> dict[str, float]:
+    """Sub-period stability metrics over a single equity curve.
+
+    These exist because IS-window Calmar can hide regime concentration —
+    e.g., a strategy whose returns come almost entirely from 2 of 9 years
+    will headline at Calmar 0.8 but degrade catastrophically OOS. Surfacing
+    sub-period Calmar and PnL-year concentration at submit time lets the
+    leaderboard flag the issue *before* OOS evaluation burns compute.
+
+    Returns:
+        is_calmar_h1: Calmar on the first half of the equity curve.
+        is_calmar_h2: Calmar on the second half.
+        is_calmar_min: min(h1, h2) — single number for ranking by stability.
+        is_pnl_top2y_pct: fraction of total log-PnL contributed by the best
+            2 calendar years. High values (>0.6) indicate the strategy is
+            essentially a bet on a small number of regime windows.
+    """
+    if len(equity) < 4:
+        return {
+            "is_calmar_h1": 0.0,
+            "is_calmar_h2": 0.0,
+            "is_calmar_min": 0.0,
+            "is_pnl_top2y_pct": 0.0,
+        }
+    mid = len(equity) // 2
+    h1 = equity.iloc[: mid + 1]
+    h2 = equity.iloc[mid:]
+    calmar_h1 = _calmar_from_equity(h1, periods_per_year)
+    calmar_h2 = _calmar_from_equity(h2, periods_per_year)
+
+    log_returns = np.log1p(returns.fillna(0.0))
+    yearly_log = log_returns.groupby(log_returns.index.year).sum()
+    if len(yearly_log) == 0 or yearly_log.sum() <= 0:
+        top2_pct = 0.0
+    else:
+        top2 = yearly_log.nlargest(min(2, len(yearly_log))).sum()
+        total = yearly_log.sum()
+        top2_pct = float(top2 / total) if total > 0 else 0.0
+
+    return {
+        "is_calmar_h1": round(float(calmar_h1), 4),
+        "is_calmar_h2": round(float(calmar_h2), 4),
+        "is_calmar_min": round(min(float(calmar_h1), float(calmar_h2)), 4),
+        "is_pnl_top2y_pct": round(top2_pct, 4),
+    }

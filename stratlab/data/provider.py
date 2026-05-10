@@ -161,11 +161,23 @@ def _merge_cache(cached: pd.DataFrame | None, fresh: pd.DataFrame) -> pd.DataFra
     return merged
 
 
+_COVERS_START_GRACE = pd.tseries.offsets.BDay(5)
+
+
 def _covers(cached: pd.DataFrame | None, start: pd.Timestamp, end: pd.Timestamp) -> bool:
+    """True if ``cached`` covers ``[start, end]``, with a ~5-business-day grace
+    window on ``start``.
+
+    The grace lets cached series whose first row falls a few trading days after
+    the requested ``start`` count as covering — common when ``start`` lands on a
+    weekend/holiday (e.g. 2010-01-01 vs cache_start=2010-01-04). Without it,
+    every backtest with ``IS_START=2010-01-01`` triggers refresh attempts on
+    perfectly-cached tickers, and a flaky network drops them entirely.
+    """
     return (
         cached is not None
         and not cached.empty
-        and cached.index.min() <= start
+        and cached.index.min() <= start + _COVERS_START_GRACE
         and cached.index.max() >= end
     )
 

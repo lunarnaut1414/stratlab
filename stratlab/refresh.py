@@ -69,11 +69,12 @@ _ORPHAN_CACHE_RE = re.compile(r"^.+_\w+_[0-9a-f]{16}\.csv$")
 
 # yf.download saturates the connection pool when given 800+ tickers at once
 # (DNS resolution failures, dropped responses). Chunk into manageable groups
-# so each batch fits well within macOS / urllib defaults. Large date ranges
-# compound the issue: 50 tickers × 99 years (~1.2M rows) is the sweet spot
-# where Yahoo reliably returns every ticker we asked for.
+# so each batch fits well within macOS / urllib defaults. With threads=False
+# (set in _fetch_chunk to avoid curl_cffi/DNS races at 5000-ticker scale),
+# only one connection is open at a time, so chunk size mostly affects loop
+# overhead rather than parallelism — 50 is a reasonable middle ground.
 BATCH_CHUNK_SIZE = 50
-INTER_CHUNK_SLEEP = 1.0  # gentle pause between chunks
+INTER_CHUNK_SLEEP = 2.5  # gentle pause between chunks
 
 # Per-ticker retry pace: when the bulk endpoint silently drops a ticker, we
 # retry that name alone via yf.Ticker.history(), which is far more reliable.
@@ -509,7 +510,12 @@ def _fetch_chunk(
         auto_adjust=True,
         group_by="ticker",
         progress=False,
-        threads=True,
+        # threads=True spawns N parallel DNS lookups per chunk and overwhelms
+        # macOS's mDNSResponder once the universe is in the thousands — failures
+        # show as "getaddrinfo() thread failed to start" or "Could not resolve
+        # host". Sequential fetches via HTTP keep-alive are much slower per
+        # chunk but reliable at 4000-ticker scale.
+        threads=False,
     )
     if start is None:
         download_kwargs["period"] = "max"

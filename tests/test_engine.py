@@ -20,7 +20,7 @@ from __future__ import annotations
 import pytest
 
 from stratlab.engine.backtest import Backtest
-from stratlab.engine.broker import Order, OrderSide
+from stratlab.engine.broker import Order, OrderSide, is_tradeable_symbol
 from stratlab.strategies.base import Strategy
 
 
@@ -241,3 +241,162 @@ def test_history_excludes_today():
     assert seen_lengths == [0, 1, 2, 3, 4]
     # And the last visible bar is always strictly before today's index.
     assert seen_last_bar == list(df.index[:-1])
+
+
+# --- Cash gate ----------------------------------------------------------
+
+def test_cash_gate_rejects_overbuy(flat_price):
+    """A BUY whose notional exceeds available cash is rejected when
+    enforce_cash=True (the default). Cash and position stay unchanged."""
+    class _OverBuy(Strategy):
+        def on_bar(self, ctx):
+            if ctx.idx == 1:
+                # 10000 shares at $100 = $1M notional, only $100k cash
+                return [Order(side=OrderSide.BUY, size=10000.0)]
+            return []
+
+    bt = Backtest(
+        data={"A": flat_price}, strategy=_OverBuy(),
+        initial_cash=100_000.0, commission_pct=0.0, slippage_pct=0.0,
+    )
+    result = bt.run()
+    assert len(result.fills) == 0, "cash gate should have rejected overbuy"
+    assert result.metrics["dropped_orders"] == 1
+    assert bt.broker.cash == pytest.approx(100_000.0)
+    assert bt.broker.positions["A"].size == 0.0
+
+
+@pytest.mark.parametrize(
+    "symbol,expected",
+    [
+        ("AAPL", True),       # plain stock
+        ("BRK-B", True),      # class share
+        ("SPY", True),        # ETF
+        ("TQQQ", True),       # leveraged ETF
+        ("NVDU", True),       # single-stock leveraged ETF
+        ("^VIX", False),      # index level
+        ("^GSPC", False),     # S&P index level
+        ("^TNX", False),      # rate index
+        ("ES=F", False),      # continuous future
+        ("GC=F", False),      # gold continuous future
+        ("EURUSD=X", False),  # spot FX
+        ("", False),          # empty
+    ],
+)
+def test_is_tradeable_symbol(symbol, expected):
+    assert is_tradeable_symbol(symbol) is expected
+
+
+def test_index_orders_rejected_by_broker(flat_price):
+    """Submitting an order against an index level (^VIX) is silently
+    dropped by the broker — strategies can read ^VIX as a signal but
+    can't take a position in it."""
+    class _BuyIndex(Strategy):
+        def on_bar(self, ctx):
+            if ctx.idx == 1:
+                return [Order(side=OrderSide.BUY, size=1.0, symbol="^VIX")]
+            return []
+
+    bt = Backtest(
+        data={"^VIX": flat_price}, strategy=_BuyIndex(),
+        initial_cash=100_000.0, commission_pct=0.0, slippage_pct=0.0,
+    )
+    result = bt.run()
+    assert len(result.fills) == 0
+    assert result.metrics["dropped_orders"] == 1
+    assert bt.broker.cash == pytest.approx(100_000.0)
+
+
+def test_futures_orders_rejected_by_broker(flat_price):
+    """Continuous-future tickers (=F suffix) are signal-only — Yahoo's
+    back-adjusted series doesn't correspond to a tradeable contract."""
+    class _BuyFutures(Strategy):
+        def on_bar(self, ctx):
+            if ctx.idx == 1:
+                return [Order(side=OrderSide.BUY, size=1.0, symbol="ES=F")]
+            return []
+
+    bt = Backtest(
+        data={"ES=F": flat_price}, strategy=_BuyFutures(),
+        initial_cash=100_000.0, commission_pct=0.0, slippage_pct=0.0,
+    )
+    result = bt.run()
+    assert len(result.fills) == 0
+    assert result.metrics["dropped_orders"] == 1
+
+
+def test_ctx_symbols_excludes_signal_only(flat_price):
+    """``ctx.symbols`` only lists tradeable instruments; signal-only
+    series like ^VIX are visible via ``ctx.signal_symbols`` and
+    ``ctx.history(sym)`` for reading, but not for ordering."""
+    seen_symbols: list[list[str]] = []
+    seen_signal_symbols: list[list[str]] = []
+    seen_history_for_vix: list[bool] = []
+
+    class _Inspect(Strategy):
+        def on_bar(self, ctx):
+            if ctx.idx == 5:
+                seen_symbols.append(list(ctx.symbols))
+                seen_signal_symbols.append(list(ctx.signal_symbols))
+                # ^VIX history must still be readable
+                hist = ctx.history("^VIX")
+                seen_history_for_vix.append(not hist.empty)
+            return []
+
+    bt = Backtest(
+        data={"AAPL": flat_price, "^VIX": flat_price, "ES=F": flat_price},
+        strategy=_Inspect(),
+    )
+    bt.run()
+    assert seen_symbols == [["AAPL"]]
+    assert sorted(seen_signal_symbols[0]) == ["AAPL", "ES=F", "^VIX"]
+    assert seen_history_for_vix == [True]
+
+
+def test_tearsheet_combined_smoke(linear_ramp, flat_price):
+    """Sanity-check that tearsheet_combined renders without crashing when
+    given two BacktestResults from the same strategy. Doesn't assert on
+    visual content — just that the figure is produced."""
+    from stratlab.analytics.tearsheet import tearsheet_combined
+
+    is_bt = Backtest(
+        data={"A": linear_ramp}, strategy=_BuyOnce(),
+        initial_cash=100_000.0, commission_pct=0.0, slippage_pct=0.0,
+    )
+    is_result = is_bt.run()
+
+    oos_bt = Backtest(
+        data={"A": flat_price}, strategy=_BuyOnce(),
+        initial_cash=100_000.0, commission_pct=0.0, slippage_pct=0.0,
+    )
+    oos_result = oos_bt.run()
+
+    fig = tearsheet_combined(is_result, oos_result, benchmark=None, title="test")
+    assert fig is not None
+    # The combined equity curve must span both windows; plotly stores trace
+    # data on the first scatter (the strategy line).
+    eq_trace = next(t for t in fig.data if getattr(t, "name", "") == "Strategy")
+    assert len(eq_trace.x) == len(is_result.equity_curve) + len(oos_result.equity_curve) - (
+        1 if is_result.equity_curve.index[-1] == oos_result.equity_curve.index[0] else 0
+    )
+
+
+def test_cash_gate_disabled_allows_overbuy(flat_price):
+    """With enforce_cash=False, an overbuy fills and pushes cash negative
+    (legacy behavior for backtests assuming implicit margin)."""
+    class _OverBuy(Strategy):
+        def on_bar(self, ctx):
+            if ctx.idx == 1:
+                return [Order(side=OrderSide.BUY, size=10000.0)]
+            return []
+
+    bt = Backtest(
+        data={"A": flat_price}, strategy=_OverBuy(),
+        initial_cash=100_000.0, commission_pct=0.0, slippage_pct=0.0,
+    )
+    bt.broker.enforce_cash = False
+    bt.broker.reset()
+    result = bt.run()
+    assert len(result.fills) == 1
+    assert bt.broker.cash < 0  # over-leveraged
+    assert bt.broker.positions["A"].size == 10000.0

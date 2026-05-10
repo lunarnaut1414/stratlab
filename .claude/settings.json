@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m stratlab.arena.submit *)",
+      "Bash(python -m stratlab.arena.intents *)",
+      "Bash(python -m stratlab.arena.promote *)",
+      "Bash(python -m stratlab.arena.cleanup *)",
+      "Bash(python -m stratlab.arena.dump_trades *)",
+      "Bash(python -m stratlab.arena.dump_equity_curve *)",
+      "Bash(python -m stratlab.arena.regime_check *)",
+      "Bash(python -m stratlab.arena.seed *)",
+      "Bash(python -m stratlab.data.inception *)",
+      "Bash(python -m stratlab.data.catalog *)",
+      "Bash(python -m pytest *)",
+      "Bash(./.venv/bin/pytest tests/ *)"
+    ]
+  }
+}

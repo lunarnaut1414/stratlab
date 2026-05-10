@@ -73,6 +73,7 @@ FUTURES_CATEGORIES: dict[str, list[str]] = {
         "6A=F",      # Australian Dollar
         "6N=F",      # New Zealand Dollar
         "6M=F",      # Mexican Peso
+        "DX=F",      # US Dollar Index (ICE)
     ],
     "crypto": [
         "BTC=F",     # CME Bitcoin

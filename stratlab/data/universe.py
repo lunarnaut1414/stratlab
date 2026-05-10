@@ -10,7 +10,12 @@ import pandas as pd
 import requests
 import yfinance as yf
 
-from stratlab.data._etf_lists import INVERSE_ETFS, LEVERAGED_ETFS, POPULAR_ETFS
+from stratlab.data._etf_lists import (
+    INVERSE_ETFS,
+    LEVERAGED_ETFS,
+    POPULAR_ETFS,
+    SINGLE_STOCK_LEVERAGED_ETFS,
+)
 from stratlab.data._futures_lists import FUTURES_CATEGORIES
 from stratlab.data._index_lists import INDEX_CATEGORIES
 from stratlab.data.provider import (
@@ -38,6 +43,11 @@ _US_TICKER_RE = re.compile(r"^[A-Z]{1,5}(-[A-Z]{1,2})?$")
 SP500_WIKI_URL = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
 NASDAQ100_WIKI_URL = "https://en.wikipedia.org/wiki/Nasdaq-100"
 DOW30_WIKI_URL = "https://en.wikipedia.org/wiki/Dow_Jones_Industrial_Average"
+NASDAQ_LISTED_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
+IWM_HOLDINGS_URL = (
+    "https://www.ishares.com/us/products/239710/ishares-russell-2000-etf/"
+    "1467271812596.ajax?fileType=csv&fileName=IWM_holdings&dataType=fund"
+)
 
 
 def _scrape_index_tickers(
@@ -207,6 +217,108 @@ def dow30_tickers(use_cache: bool = True, max_age_days: int = 7) -> list[str]:
     )
 
 
+def nasdaq_listed_tickers(use_cache: bool = True, max_age_days: int = 7) -> list[str]:
+    """Common stocks listed on the Nasdaq exchange — effectively the Nasdaq
+    Composite, minus rights/warrants/units/test issues/ETFs.
+
+    Source: ``nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt`` — the official
+    daily symbol directory. Filters: Test Issue == N, ETF == N, and ticker
+    must match the standard 1-5-letter common-stock pattern (excludes Nasdaq's
+    5th-letter classification suffixes for rights/warrants/units/preferreds).
+    """
+    cache_path = INDICES_DIR / "nasdaq_listed.json"
+    if use_cache and cache_path.exists():
+        payload = json.loads(cache_path.read_text())
+        fetched_at = datetime.fromisoformat(payload["fetched_at"])
+        if datetime.now() - fetched_at < timedelta(days=max_age_days):
+            return payload["tickers"]
+
+    resp = requests.get(NASDAQ_LISTED_URL, headers={"User-Agent": _USER_AGENT}, timeout=30)
+    resp.raise_for_status()
+    lines = [l for l in resp.text.splitlines() if not l.startswith("File Creation Time")]
+    df = pd.read_csv(io.StringIO("\n".join(lines)), sep="|")
+    df = df[df["Test Issue"].astype(str).str.upper() == "N"]
+    df = df[df["ETF"].astype(str).str.upper() == "N"]
+
+    # Drop derivative securities sharing the same root ticker as a common stock
+    # (rights, warrants, units, preferreds, debt). Nasdaq's 5th-letter scheme
+    # is unreliable (GOOGL ends in L), so we filter on Security Name keywords.
+    bad_keywords = (
+        "Right", "Warrant", "Unit", "Preferred", "Notes",
+        "Convertible", "Debenture", "Subordinated",
+    )
+    def _is_common(name: str) -> bool:
+        s = str(name) if name is not None else ""
+        return bool(s) and not any(kw in s for kw in bad_keywords)
+
+    df = df[df["Security Name"].apply(_is_common)]
+
+    tickers: list[str] = []
+    for raw_t in df["Symbol"].dropna().tolist():
+        t = str(raw_t).replace(".", "-").strip()
+        if t and _US_TICKER_RE.match(t):
+            tickers.append(t)
+
+    if not tickers:
+        raise ValueError("nasdaqlisted.txt parsed but yielded no tickers")
+
+    INDICES_DIR.mkdir(parents=True, exist_ok=True)
+    cache_path.write_text(
+        json.dumps({"fetched_at": datetime.now().isoformat(), "tickers": tickers}, indent=2)
+    )
+    return tickers
+
+
+def russell2000_tickers(use_cache: bool = True, max_age_days: int = 7) -> list[str]:
+    """Current Russell 2000 constituents, derived from iShares IWM holdings.
+
+    Source: the iShares IWM holdings CSV. IWM is the canonical Russell 2000
+    ETF, so its equity holdings are the index. Cash/derivative rows are
+    dropped; ticker normalization matches Yahoo (``BRK.B`` → ``BRK-B``).
+    """
+    cache_path = INDICES_DIR / "russell2000.json"
+    if use_cache and cache_path.exists():
+        payload = json.loads(cache_path.read_text())
+        fetched_at = datetime.fromisoformat(payload["fetched_at"])
+        if datetime.now() - fetched_at < timedelta(days=max_age_days):
+            return payload["tickers"]
+
+    resp = requests.get(
+        IWM_HOLDINGS_URL,
+        headers={"User-Agent": "Mozilla/5.0"},
+        timeout=30,
+    )
+    resp.raise_for_status()
+
+    raw_lines = resp.text.splitlines()
+    header_idx = None
+    for i, line in enumerate(raw_lines):
+        if line.startswith("Ticker,"):
+            header_idx = i
+            break
+    if header_idx is None:
+        raise ValueError("Could not locate Ticker header in IWM holdings file")
+
+    df = pd.read_csv(io.StringIO("\n".join(raw_lines[header_idx:])))
+    if "Asset Class" in df.columns:
+        df = df[df["Asset Class"].astype(str).str.strip() == "Equity"]
+
+    tickers: list[str] = []
+    for raw_t in df["Ticker"].dropna().tolist():
+        t = str(raw_t).replace(".", "-").strip()
+        if t and _US_TICKER_RE.match(t):
+            tickers.append(t)
+
+    if not tickers:
+        raise ValueError("IWM holdings parsed but yielded no tickers")
+
+    INDICES_DIR.mkdir(parents=True, exist_ok=True)
+    cache_path.write_text(
+        json.dumps({"fetched_at": datetime.now().isoformat(), "tickers": tickers}, indent=2)
+    )
+    return tickers
+
+
 def popular_etfs() -> list[str]:
     """~200 broadly-traded ETFs covering equity, bonds, commodities, REITs,
     currency, factor, thematic, crypto, and volatility. Long-side, unlevered."""
@@ -223,6 +335,14 @@ def leveraged_etfs() -> list[str]:
     """~35 leveraged long ETFs (2x, 3x). Daily-rebalanced — multi-day holds
     drift from a simple multiple due to volatility decay."""
     return list(LEVERAGED_ETFS)
+
+
+def single_stock_leveraged_etfs() -> list[str]:
+    """~115 daily-leveraged and inverse single-stock ETFs from Direxion,
+    GraniteShares, and REX Shares (T-REX). Each tracks one underlying with
+    2x bull / -1x or -2x bear exposure (some 1.25x). Same volatility-decay
+    caveat as broad leveraged ETFs."""
+    return list(SINGLE_STOCK_LEVERAGED_ETFS)
 
 
 def _flat(mapping: dict[str, list[str]], *categories: str) -> list[str]:
@@ -291,18 +411,22 @@ def all_futures() -> list[str]:
 def default_universe(
     include_sp500: bool = True,
     include_nasdaq100: bool = True,
+    include_nasdaq_listed: bool = True,
+    include_russell2000: bool = True,
     include_dow30: bool = True,
     include_etfs: bool = True,
     include_inverse: bool = True,
     include_leveraged: bool = True,
+    include_single_stock_leveraged: bool = True,
     include_indices: bool = True,
     include_futures: bool = True,
 ) -> list[str]:
     """Combined deduped universe across asset classes.
 
-    Defaults to *everything* — roughly 850 tickers. Toggle the flags to scope
-    down (e.g. ``include_futures=False`` for a stocks-only universe). Order is
-    preserved so the result is reproducible across runs.
+    Defaults to *everything* — roughly 5000 tickers once Nasdaq-listed and the
+    Russell 2000 are in. Toggle flags to scope down (e.g. for a stocks-only
+    universe set ``include_futures=False``). Order is preserved so the result
+    is reproducible across runs.
     """
     seen: dict[str, None] = {}
     parts: list[list[str]] = []
@@ -310,6 +434,10 @@ def default_universe(
         parts.append(sp500_tickers())
     if include_nasdaq100:
         parts.append(nasdaq100_tickers())
+    if include_nasdaq_listed:
+        parts.append(nasdaq_listed_tickers())
+    if include_russell2000:
+        parts.append(russell2000_tickers())
     if include_dow30:
         parts.append(dow30_tickers())
     if include_etfs:
@@ -318,6 +446,8 @@ def default_universe(
         parts.append(inverse_etfs())
     if include_leveraged:
         parts.append(leveraged_etfs())
+    if include_single_stock_leveraged:
+        parts.append(single_stock_leveraged_etfs())
     if include_indices:
         parts.append(all_indices())
     if include_futures:

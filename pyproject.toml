@@ -11,6 +11,10 @@ dependencies = [
     "numpy>=1.24",
     "pandas>=2.0",
     "yfinance>=0.2.30",
+    # Pin away from curl_cffi 0.15.0 — its prebuilt macOS arm64 wheel fails to
+    # link `_CFRelease` from CoreFoundation. 0.14.0's wheel is clean and is
+    # API-compatible with yfinance 1.3.x at runtime.
+    "curl_cffi>=0.14,<0.15",
     "gymnasium>=0.29",
     "plotly>=5.15",
     "lxml>=4.9",

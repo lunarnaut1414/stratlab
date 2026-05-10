@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 import pandas as pd
 
-from stratlab.engine.broker import Broker
+from stratlab.engine.broker import Broker, is_tradeable_symbol
 from stratlab.engine.context import BarContext
 
 if TYPE_CHECKING:
@@ -99,7 +99,14 @@ class Backtest:
 
         for i in range(n_bars):
             bar_closes = closes_df.iloc[i]
-            tradeable = bar_closes.index[bar_closes.notna()].tolist()
+            with_data = bar_closes.index[bar_closes.notna()].tolist()
+            # ``tradeable`` is what strategies can *order* this bar — real
+            # securities (stocks/ETFs/ETNs). ``signal_symbols`` is the wider
+            # set that also includes index levels (``^VIX``), continuous
+            # futures (``ES=F``), and spot FX (``EURUSD=X``) — all readable
+            # via ``ctx.history(sym)`` but rejected at the broker.
+            tradeable = [s for s in with_data if is_tradeable_symbol(s)]
+            signal_symbols = with_data
 
             # Borrow accrual covers the calendar gap from the prior bar to this
             # bar's open, before today's fills happen.
@@ -115,6 +122,7 @@ class Backtest:
                 idx=i,
                 timestamp=common_index[i],
                 symbols=tradeable,
+                signal_symbols=signal_symbols,
                 _aligned=aligned,
                 _closes_df=closes_df,
                 _broker=self.broker,

@@ -91,6 +91,135 @@ def tearsheet(
     return fig
 
 
+def tearsheet_combined(
+    is_result: BacktestResult,
+    oos_result: BacktestResult,
+    benchmark: str | pd.Series | None = "SPY",
+    title: str = "Strategy Tearsheet",
+):
+    """Render IS + OOS as a single continuous tearsheet with a boundary marker.
+
+    The IS equity curve runs as-is. The OOS equity curve is rescaled so its
+    first point matches the IS ending value, producing one visually
+    continuous curve that spans the full lifetime. A dashed vertical line at
+    the IS/OOS boundary lets you eyeball whether the post-2018 trajectory
+    looks like the pre-2018 one or breaks character.
+
+    All panels (drawdown, monthly heatmap, rolling Sharpe, trade scatter)
+    use combined data so a single chart tells the whole story. Headline
+    metrics show IS and OOS side-by-side so degradation across the boundary
+    is obvious.
+    """
+    import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
+
+    is_eq = is_result.equity_curve
+    oos_eq = oos_result.equity_curve
+    if len(is_eq) < 2 or len(oos_eq) < 2:
+        raise ValueError("both BacktestResults need >=2 equity points")
+
+    # Stitch: rescale OOS so its first point equals IS's last point.
+    # Drop the duplicate boundary day from OOS to avoid two values on the
+    # same date in the combined index.
+    scale = float(is_eq.iloc[-1]) / float(oos_eq.iloc[0])
+    oos_scaled = oos_eq * scale
+    if oos_scaled.index[0] == is_eq.index[-1]:
+        oos_scaled = oos_scaled.iloc[1:]
+    combined_eq = pd.concat([is_eq, oos_scaled])
+
+    # Combined returns mirror the same logic — drop the OOS first-day return
+    # (which is 0 by construction) so we don't double-count the boundary.
+    is_rets = is_result.returns
+    oos_rets = oos_result.returns
+    if len(oos_rets) > 0 and oos_rets.index[0] == is_rets.index[-1]:
+        oos_rets = oos_rets.iloc[1:]
+    combined_rets = pd.concat([is_rets, oos_rets])
+
+    boundary_date = oos_eq.index[0]
+    bench_eq = _resolve_benchmark(benchmark, combined_eq.index)
+
+    is_m = is_result.metrics
+    oos_m = oos_result.metrics
+    headline = (
+        f"{title}<br>"
+        f"<sup>"
+        f"IS &nbsp; CAGR <b>{is_m.get('cagr', 0):.1%}</b> &nbsp; "
+        f"Sharpe <b>{is_m.get('sharpe', 0):.2f}</b> &nbsp; "
+        f"MaxDD <b>{is_m.get('max_drawdown', 0):.1%}</b> &nbsp; "
+        f"Calmar <b>{is_m.get('calmar', 0):.2f}</b>"
+        f" &nbsp;&nbsp;·&nbsp;&nbsp; "
+        f"OOS &nbsp; CAGR <b>{oos_m.get('cagr', 0):.1%}</b> &nbsp; "
+        f"Sharpe <b>{oos_m.get('sharpe', 0):.2f}</b> &nbsp; "
+        f"MaxDD <b>{oos_m.get('max_drawdown', 0):.1%}</b> &nbsp; "
+        f"Calmar <b>{oos_m.get('calmar', 0):.2f}</b>"
+        f"</sup>"
+    )
+
+    fig = make_subplots(
+        rows=4, cols=2,
+        row_heights=[0.40, 0.15, 0.25, 0.20],
+        vertical_spacing=0.07, horizontal_spacing=0.10,
+        specs=[
+            [{"colspan": 2}, None],
+            [{"colspan": 2}, None],
+            [{}, {}],
+            [{"colspan": 2}, None],
+        ],
+        subplot_titles=[
+            "Equity Curve (normalized to 1.0) — IS in blue · OOS shaded",
+            "Underwater Drawdown",
+            "Monthly Returns",
+            "Rolling 6-month Sharpe",
+            "Round-trip Trades — return % vs holding days",
+        ],
+    )
+
+    _add_equity_panel(fig, combined_eq, bench_eq, row=1, col=1)
+    _add_drawdown_panel(fig, combined_eq, row=2, col=1)
+    _add_monthly_heatmap(fig, combined_rets, row=3, col=1)
+    _add_rolling_sharpe(fig, combined_rets, row=3, col=2)
+    _add_trade_scatter(
+        fig,
+        list(is_result.trades) + list(oos_result.trades),
+        row=4, col=1,
+    )
+
+    # Vertical divider on the time-axis panels (equity, drawdown, rolling
+    # Sharpe). Plotly wants ms-since-epoch for datetime add_vline.
+    boundary_ms = pd.Timestamp(boundary_date).timestamp() * 1000
+    for r, c in [(1, 1), (2, 1), (3, 2)]:
+        fig.add_vline(
+            x=boundary_ms,
+            line=dict(color="#FFB300", width=2, dash="dash"),
+            row=r, col=c,
+        )
+    fig.add_annotation(
+        x=boundary_ms, y=1.02, xref="x", yref="paper",
+        text=f"OOS begins {pd.Timestamp(boundary_date).date()}",
+        showarrow=False, font=dict(color="#FFB300", size=11),
+        xanchor="left",
+    )
+
+    # Shade the OOS region of the equity panel for visual emphasis.
+    fig.add_vrect(
+        x0=boundary_ms,
+        x1=pd.Timestamp(combined_eq.index[-1]).timestamp() * 1000,
+        fillcolor="#FFB300", opacity=0.06, line_width=0,
+        row=1, col=1,
+    )
+
+    fig.update_layout(
+        template="plotly_dark",
+        height=1200,
+        showlegend=True,
+        title=dict(text=headline, x=0.01, xanchor="left", font=dict(size=14)),
+        margin=dict(t=110, l=60, r=40, b=40),
+        legend=dict(orientation="h", y=1.02, x=0.5, xanchor="center"),
+    )
+    fig.update_yaxes(tickformat=".1%", row=2, col=1)
+    return fig
+
+
 def _resolve_benchmark(benchmark, idx: pd.DatetimeIndex) -> pd.Series | None:
     if benchmark is None:
         return None

@@ -25,6 +25,7 @@ INDEX_CATEGORIES: dict[str, list[str]] = {
     ],
     "equity": [
         "^GSPC",      # S&P 500 (canonical Yahoo symbol; ^SPX is an alias)
+        "^SPX",       # S&P 500 alias (same series, different ticker)
         "^DJI",       # Dow Jones Industrial Average
         "^IXIC",      # NASDAQ Composite
         "^NDX",       # NASDAQ-100

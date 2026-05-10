@@ -29,9 +29,24 @@ class BarContext:
     idx: int
     timestamp: pd.Timestamp
     symbols: list[str]
+    """Tradeable symbols with data on this bar — stocks, ETFs, ETNs.
+
+    Strategies iterate this to drive their order loop. Index levels
+    (``^VIX``), continuous futures (``ES=F``), and spot FX (``EURUSD=X``)
+    are excluded here — they're signal-only and live on
+    :attr:`signal_symbols`.
+    """
+
     _aligned: dict[str, pd.DataFrame] = field(repr=False)
     _closes_df: pd.DataFrame = field(repr=False)
     _broker: Broker = field(repr=False)
+    signal_symbols: list[str] = field(default_factory=list, repr=False)
+    """All symbols with data on this bar, including non-tradeable signal
+    series (``^VIX``, ``^TNX``, ``ES=F``, ``EURUSD=X``). Use this when you
+    need a regime or macro signal alongside the tradeable universe.
+    Reading via :meth:`history` works for any symbol regardless of which
+    list it appears on.
+    """
 
     def history(self, symbol: str | None = None) -> pd.DataFrame:
         """Bars before today (``[0, idx)``) for ``symbol``.
