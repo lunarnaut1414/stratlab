@@ -9,7 +9,11 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from stratlab.analytics.metrics import compute_metrics, compute_subperiod_metrics
+from stratlab.analytics.metrics import (
+    compute_metrics,
+    compute_period_returns,
+    compute_subperiod_metrics,
+)
 
 
 def test_compute_metrics_flat_equity_zeros_out():
@@ -99,3 +103,38 @@ def test_compute_subperiod_metrics_h2_drawdown_dominates():
     m = compute_subperiod_metrics(eq, rets)
     assert m["is_calmar_h1"] > m["is_calmar_h2"]
     assert m["is_calmar_min"] == m["is_calmar_h2"]
+
+
+def test_compute_period_returns_full_history_doubled():
+    """Equity doubled over 16 calendar years: since-inception ≈ 4.4% annualized,
+    1y ≈ 4.4% (continuing the same growth), 10y_ann ≈ 4.4%, all populated."""
+    idx = pd.date_range("2010-01-04", "2026-05-10", freq="B")
+    eq = pd.Series(np.linspace(100, 200, len(idx)), index=idx)
+    r = compute_period_returns(eq)
+    assert r["return_since_inception_ann"] == pytest.approx(0.043, abs=0.01)
+    assert not pd.isna(r["return_10y_ann"])
+    assert not pd.isna(r["return_5y_ann"])
+    assert not pd.isna(r["return_3y_ann"])
+    assert not pd.isna(r["return_1y"])
+    assert not pd.isna(r["return_ytd"])
+
+
+def test_compute_period_returns_short_history_returns_nan_for_long_periods():
+    """A ~6-year curve cannot report a 10y annualized return — investors see NaN
+    rather than a misleadingly-annualized partial-period figure."""
+    idx = pd.date_range("2018-01-02", "2024-06-28", freq="B")
+    eq = pd.Series(np.linspace(100, 150, len(idx)), index=idx)
+    r = compute_period_returns(eq)
+    assert pd.isna(r["return_10y_ann"])
+    assert not pd.isna(r["return_5y_ann"])
+    assert not pd.isna(r["return_3y_ann"])
+    assert not pd.isna(r["return_since_inception_ann"])
+
+
+def test_compute_period_returns_ytd_partial_year():
+    """YTD reflects January 1 of the curve's last year onward, even when the
+    curve ends mid-year (matches Morningstar/PIMCO factsheet convention)."""
+    idx = pd.date_range("2025-01-02", "2026-05-10", freq="B")
+    eq = pd.Series(np.linspace(100, 130, len(idx)), index=idx)
+    r = compute_period_returns(eq)
+    assert 0.0 < r["return_ytd"] < r["return_1y"]

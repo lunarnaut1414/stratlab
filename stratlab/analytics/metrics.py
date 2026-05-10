@@ -53,6 +53,77 @@ def compute_metrics(
     }
 
 
+PERIOD_RETURN_KEYS = (
+    "return_ytd",
+    "return_1y",
+    "return_3y_ann",
+    "return_5y_ann",
+    "return_10y_ann",
+    "return_since_inception_ann",
+)
+
+
+def compute_period_returns(equity: pd.Series) -> dict[str, float]:
+    """Trailing-period returns relative to the equity curve's last date.
+
+    Mirrors a PIMCO / Morningstar-style fund factsheet: YTD and 1y are total
+    returns; 3y / 5y / 10y / since-inception are annualized (geometric CAGR
+    over the actual elapsed calendar window). Returns NaN for any period
+    longer than the curve's available history — investors should see "—",
+    not a misleadingly-annualized partial-period figure.
+    """
+    nan = float("nan")
+    out = {k: nan for k in PERIOD_RETURN_KEYS}
+    if len(equity) < 2:
+        return out
+
+    end_date = equity.index[-1]
+    end_val = float(equity.iloc[-1])
+    start_date = equity.index[0]
+    start_val = float(equity.iloc[0])
+    if start_val <= 0:
+        return out
+
+    total_days = (end_date - start_date).days
+    if total_days > 0:
+        n_years = total_days / 365.25
+        out["return_since_inception_ann"] = round(
+            (end_val / start_val) ** (1.0 / n_years) - 1.0, 4
+        )
+
+    def _trailing(years: int, annualize: bool) -> float:
+        cutoff = end_date - pd.DateOffset(years=years)
+        if cutoff < start_date:
+            return nan
+        sliced = equity[equity.index >= cutoff]
+        if len(sliced) < 2:
+            return nan
+        s_val = float(sliced.iloc[0])
+        if s_val <= 0:
+            return nan
+        total = end_val / s_val - 1.0
+        if not annualize:
+            return round(total, 4)
+        elapsed = (sliced.index[-1] - sliced.index[0]).days
+        if elapsed <= 0:
+            return nan
+        return round((end_val / s_val) ** (365.25 / elapsed) - 1.0, 4)
+
+    out["return_1y"] = _trailing(1, annualize=False)
+    out["return_3y_ann"] = _trailing(3, annualize=True)
+    out["return_5y_ann"] = _trailing(5, annualize=True)
+    out["return_10y_ann"] = _trailing(10, annualize=True)
+
+    ytd_cutoff = pd.Timestamp(year=end_date.year, month=1, day=1)
+    ytd_sliced = equity[equity.index >= ytd_cutoff]
+    if len(ytd_sliced) >= 2:
+        ytd_start = float(ytd_sliced.iloc[0])
+        if ytd_start > 0:
+            out["return_ytd"] = round(end_val / ytd_start - 1.0, 4)
+
+    return out
+
+
 def _calmar_from_equity(equity: pd.Series, periods_per_year: int = 252) -> float:
     """Calmar from a sliced equity curve. Assumes equity is positive throughout."""
     if len(equity) < 2 or equity.iloc[0] <= 0:

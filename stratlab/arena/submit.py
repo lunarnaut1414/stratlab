@@ -54,7 +54,7 @@ from typing import Any
 
 import pandas as pd
 
-from stratlab.analytics.metrics import compute_subperiod_metrics
+from stratlab.analytics.metrics import compute_period_returns, compute_subperiod_metrics
 from stratlab.analytics.tearsheet import tearsheet
 from stratlab.arena import config
 from stratlab.arena.config import ensure_dirs, is_window_str
@@ -346,6 +346,7 @@ def submit(
     result.equity_curve.to_frame(name="equity").to_csv(equity_curve_path)
 
     subperiod = compute_subperiod_metrics(result.equity_curve, result.returns)
+    period_returns = compute_period_returns(result.equity_curve)
 
     benchmark_returns = _load_benchmark_returns(is_start, is_end)
     loss_corr, loss_twin_id = loss_mode_corr_to(
@@ -375,6 +376,7 @@ def submit(
         "is_n_trades": n_trades,
         "is_turnover": float(result.metrics.get("turnover_annualized", 0.0)),
         **subperiod,
+        **period_returns,
         "corr_to_top5": round(float(max_corr), 4),
         "loss_mode_corr_to_top5": round(float(loss_corr), 4),
         "tearsheet_path": str(tearsheet_path),

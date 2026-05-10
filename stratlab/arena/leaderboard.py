@@ -20,12 +20,24 @@ from stratlab.arena import config
 
 
 COLUMNS: list[str] = [
-    # Identity / lineage
+    # Identity (front-of-sheet, investor-style)
     "strategy_id",       # gen{N}_{slug}
+    "name",              # human-readable, from module's NAME
+    # Investor-facing trailing returns — computed from the IS-only equity
+    # curve at submit time, then overwritten with stitched IS+OOS values
+    # at promote time so OOS-evaluated rows reflect lifetime-to-today.
+    # YTD and 1y are total returns; 3y/5y/10y/since-inception are CAGR.
+    # NaN means "period exceeds available history".
+    "return_ytd",
+    "return_1y",
+    "return_3y_ann",
+    "return_5y_ann",
+    "return_10y_ann",
+    "return_since_inception_ann",
+    # Lineage / metadata
     "generation",        # int
     "parent_id",         # str (empty for seeds / unparented)
     "agent_id",          # which agent / human authored it
-    "name",              # human-readable, from module's NAME
     "path",              # path to the strategy module
     "hypothesis",        # one-sentence rationale (from module's HYPOTHESIS)
     "params_json",       # JSON-encoded strategy.params
@@ -55,12 +67,16 @@ COLUMNS: list[str] = [
     "corr_to_top5",          # max abs corr to any current top-5 at submit time
     "loss_mode_corr_to_top5",  # max abs corr on bottom-decile SPY days
     "tearsheet_path",
-    "equity_curve_path",     # path to per-strategy daily equity CSV
+    "equity_curve_path",     # path to per-strategy daily IS equity CSV
+    "equity_curve_oos_path", # path to OOS equity CSV (set at promote time)
     "notes",
 ]
 
 GENERATOR_VISIBLE_COLUMNS: list[str] = [
-    "strategy_id", "generation", "parent_id", "name", "hypothesis",
+    "strategy_id", "name",
+    "return_ytd", "return_1y", "return_3y_ann", "return_5y_ann",
+    "return_10y_ann", "return_since_inception_ann",
+    "generation", "parent_id", "hypothesis",
     "is_sharpe", "is_calmar", "is_sortino", "is_cagr",
     "is_max_dd", "is_annual_vol", "is_win_rate", "is_n_trades",
     "is_turnover", "is_calmar_h1", "is_calmar_h2", "is_calmar_min",
@@ -84,6 +100,28 @@ def read_leaderboard(path: Path | None = None) -> pd.DataFrame:
     return df[COLUMNS]
 
 
+def _sort_for_display(df: pd.DataFrame) -> pd.DataFrame:
+    """Sort the leaderboard best-to-worst.
+
+    OOS-evaluated rows rise above IS-only rows (those have been validated on
+    held-out data and are what the user actually trusts), then descending by
+    OOS Calmar. IS-only rows fall below, descending by IS Calmar.
+    """
+    if df.empty:
+        return df
+    out = df.copy()
+    has_oos = out["oos_calmar"].notna()
+    out["_sort_group"] = has_oos.astype(int)
+    out["_sort_oos"] = pd.to_numeric(out["oos_calmar"], errors="coerce").fillna(float("-inf"))
+    out["_sort_is"] = pd.to_numeric(out["is_calmar"], errors="coerce").fillna(float("-inf"))
+    out = out.sort_values(
+        by=["_sort_group", "_sort_oos", "_sort_is"],
+        ascending=[False, False, False],
+        kind="stable",
+    )
+    return out.drop(columns=["_sort_group", "_sort_oos", "_sort_is"])
+
+
 def append_row(row: dict, path: Path | None = None) -> None:
     """Append a single row to the leaderboard CSV, enforcing schema order."""
     path = path or config.LEADERBOARD
@@ -91,6 +129,7 @@ def append_row(row: dict, path: Path | None = None) -> None:
     full_row = {c: row.get(c, pd.NA) for c in COLUMNS}
     new_row_df = pd.DataFrame([full_row])
     df_new = new_row_df if df.empty else pd.concat([df, new_row_df], ignore_index=True)
+    df_new = _sort_for_display(df_new)
     path.parent.mkdir(parents=True, exist_ok=True)
     df_new.to_csv(path, index=False)
 
@@ -115,6 +154,7 @@ def update_oos(
             raise ValueError(f"unknown leaderboard column {col!r}")
         df.loc[mask, col] = val
     df.loc[mask, "oos_evaluated_at"] = datetime.now().isoformat(timespec="seconds")
+    df = _sort_for_display(df)
     df.to_csv(path, index=False)
 
 
