@@ -115,6 +115,8 @@ def resolve_universe(spec: Any) -> list[str]:
         - "sp500"          → current S&P 500 constituents
         - "sp500+hedge"    → SP500 + SPY (trend signal) + SH (inverse hedge)
         - "popular_etfs"   → curated broad/sector/factor/asset-class ETF list
+        - "popular_etfs+volatility_indices" → popular_etfs + ^VIX/^MOVE/^VVIX/
+                              ^GVZ/^TNX/^IRX/^FVX/^TYX as signal-only series
         - "inverse_etfs"   → inverse ETFs (SH, SDS, PSQ, ...)
         - "leveraged_etfs" → broad-market leveraged ETFs (TQQQ, UPRO, SOXL, ...)
         - "single_stock_leveraged_etfs" → TSLL, NVDL, AAPB, ...
@@ -123,8 +125,10 @@ def resolve_universe(spec: Any) -> list[str]:
         inverse_etfs,
         leveraged_etfs,
         popular_etfs,
+        rate_indices,
         single_stock_leveraged_etfs,
         sp500_tickers,
+        volatility_indices,
     )
 
     if callable(spec):
@@ -138,6 +142,11 @@ def resolve_universe(spec: Any) -> list[str]:
             return sp500_tickers() + ["SPY", "SH"]
         if spec == "popular_etfs":
             return popular_etfs()
+        if spec == "popular_etfs+volatility_indices":
+            # Bundle the common signal-only vol + rate indices alongside the
+            # popular_etfs tradeable set. Saves agents from repeating these
+            # ticker lists in every UNIVERSE = [...] declaration.
+            return popular_etfs() + volatility_indices() + rate_indices()
         if spec == "inverse_etfs":
             return inverse_etfs()
         if spec == "leveraged_etfs":

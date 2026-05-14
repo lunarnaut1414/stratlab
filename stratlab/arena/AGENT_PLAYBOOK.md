@@ -33,9 +33,39 @@ The narrow `.claude/settings.json` allowlist only whitelists specific stratlab h
 
 ### Allowed Bash forms (in `.claude/settings.json`'s allowlist)
 
-- `python -m stratlab.arena.{submit,intents,promote,cleanup,dump_trades,dump_equity_curve,regime_check,seed} *`
+- `python -m stratlab.arena.{submit,intents,promote,cleanup,dump_trades,dump_equity_curve,dump_annual_calmar,regime_check,corr_dump,corr_check,is_calmar_estimate,seed} *`
 - `python -m stratlab.data.{inception,catalog} *`
 - `python -m pytest *` and `./.venv/bin/pytest tests/ *`
+
+### Cheap pre-checks BEFORE wasting a full submit
+
+The arena harness now has several "dry-run" CLIs that cost less than a full
+submit and do NOT consume an intent / write to leaderboard / append to
+dead_ends. Use them aggressively to iterate on candidates before committing
+an intent:
+
+- **`python -m stratlab.arena.regime_check --signal "<expr>"`** — pre-validate
+  how often a gate fires in IS. Saves wasted submissions on too-restrictive
+  gates. Examples: `"VIX<20"`, `"TLT_21d > IEF_21d"`, `"JNK > JNK_30d_MA"`.
+- **`python -m stratlab.arena.is_calmar_estimate <strategy_path>`** — run a
+  sub-window backtest (2010-2014 by default) to estimate IS Calmar before
+  committing. ~2x faster than full IS. Use to filter candidates likely to
+  miss the 0.5 floor before paying full backtest cost.
+- **`python -m stratlab.arena.corr_check <strategy_path>`** — run the full
+  IS backtest but compute ONLY max-corr-to-top-5 + loss-mode-corr.
+  Doesn't write the leaderboard, doesn't consume an intent. Use to iterate
+  signal mix until corr falls under 0.85 without burning intent slots.
+- **`python -m stratlab.arena.corr_dump --top 12`** — pairwise IS-return
+  Pearson matrix over the top-12 leaderboard rows. Use this for ensemble
+  construction (opus-3 role) to pick components with all pairs <0.3.
+- **`python -m stratlab.arena.dump_annual_calmar <strategy_id>`** — per-year
+  return + Calmar from a strategy's persisted equity curve. Use to diagnose
+  which years carry/break a strategy when h1/h2 columns don't tell the
+  whole story.
+- **`python -m stratlab.data.inception --tickers MTUM QUAL VIG --covers-is`** —
+  multi-ticker cache-coverage check. Many factor ETFs (MTUM, QUAL launched
+  2013; SCHD 2011) do NOT cover IS_START (2010). Run this BEFORE designing
+  a strategy around those tickers to avoid silent fallbacks.
 
 ### Banned anti-patterns (will block on permission prompts)
 

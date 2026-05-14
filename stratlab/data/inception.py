@@ -183,7 +183,14 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument(
         "--universe", default="sp500",
-        help='Universe to inventory: "sp500" (default), "popular_etfs", or "all"',
+        help='Universe to inventory: "sp500" (default), "popular_etfs", or "all". '
+             'Ignored if --tickers is given.',
+    )
+    parser.add_argument(
+        "--tickers", nargs="+", default=None,
+        help="Inspect a specific list of tickers (e.g. --tickers MTUM QUAL VIG). "
+             "Overrides --universe. Useful for factor-ETF cache-coverage checks "
+             "before designing strategies around them.",
     )
     parser.add_argument(
         "--interval", default="1d",
@@ -201,13 +208,21 @@ def main(argv: list[str] | None = None) -> int:
         "--missing", action="store_true",
         help="Print only the tickers that have NO cached data.",
     )
+    parser.add_argument(
+        "--covers-is", action="store_true",
+        help="For each ticker, print whether its cached start date is on or "
+             "before the IS window start (config.IS_START). Useful for "
+             "factor-ETF coverage gap checks (MTUM, QUAL, VIG, etc.).",
+    )
     args = parser.parse_args(argv)
 
     from stratlab.data.universe import (
         sp500_tickers, popular_etfs, default_universe,
     )
 
-    if args.universe == "sp500":
+    if args.tickers:
+        tickers = list(args.tickers)
+    elif args.universe == "sp500":
         tickers = sp500_tickers()
     elif args.universe == "popular_etfs":
         tickers = popular_etfs()
@@ -234,19 +249,29 @@ def main(argv: list[str] | None = None) -> int:
     else:
         eligible = set(summaries.keys())
 
+    is_start = None
+    if args.covers_is:
+        from stratlab.arena import config as arena_config
+        is_start = arena_config.IS_START
+
     rows = []
     for t in tickers:
         s = summaries.get(t)
         if s is None:
             continue
-        rows.append({
+        row = {
             "ticker": t,
             "start": s["start"].isoformat(),
             "end": s["end"].isoformat(),
             "n_bars": s["n_bars"],
             "eligible": t in eligible,
-        })
+        }
+        if is_start is not None:
+            row["covers_is"] = s["start"] <= is_start
+        rows.append(row)
 
+    if not rows:
+        sys.stderr.write("[inception] no cached tickers among requested\n")
     df = pd.DataFrame(rows).sort_values("start")
     print(df.to_string(index=False))
 
