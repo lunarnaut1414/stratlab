@@ -4,13 +4,23 @@ Usage::
 
     python -m stratlab.arena.dump_annual_calmar <strategy_id>
     python -m stratlab.arena.dump_annual_calmar <strategy_id> --oos
+    python -m stratlab.arena.dump_annual_calmar --strategy-path <path>
     python -m stratlab.arena.dump_annual_calmar <strategy_id> --csv out.csv
 
-Reads ``tmp/arena/equity_curves/<strategy_id>.csv`` (or the OOS variant) and
-computes per-year total return, max drawdown within the year, and Calmar
+Two modes:
+
+1. ``<strategy_id>``: reads ``tmp/arena/equity_curves/<strategy_id>.csv``
+   (or the OOS variant with --oos) and decomposes the persisted equity series
+   by calendar year.
+2. ``--strategy-path <path>``: runs a fresh backtest on the candidate's module
+   over the IS window (same cost as submit) and decomposes the resulting
+   equity curve. Use this for not-yet-submitted candidates to see h1/h2
+   asymmetry, hidden negative years, or year-by-year regime concentration
+   BEFORE committing an intent. Asked for by sonnet-8 (gen_10).
+
+Per-year metrics: total return, max drawdown within the year, Calmar
 (annual return / |max DD in year|). Useful for diagnosing WHICH years carry
-or break a strategy — e.g. catching a -10% 2018 year hidden by strong
-2012-2013-2017 returns. Asked for by sonnet-9 (gen_8), opus-4 (gen_6).
+or break a strategy.
 """
 from __future__ import annotations
 
@@ -109,12 +119,46 @@ def _format_table(df: pd.DataFrame, strategy_id: str, window: str) -> str:
     return "\n".join(lines)
 
 
+def _run_backtest_for_path(strategy_path: Path) -> pd.Series:
+    """Run a fresh IS backtest on the candidate and return its daily equity curve."""
+    from stratlab.arena.submit import load_strategy_module, resolve_universe
+    from stratlab.data.inception import filter_universe_by_window_overlap
+    from stratlab.data.universe import load_universe
+    from stratlab.engine.backtest import Backtest
+
+    module = load_strategy_module(strategy_path)
+    universe_spec = getattr(module, "UNIVERSE", "sp500")
+    tickers = resolve_universe(universe_spec)
+    is_start, is_end = config.is_window_str()
+    tickers = filter_universe_by_window_overlap(tickers, start=is_start, end=is_end)
+    data = load_universe(tickers, start=is_start, end=is_end)
+    if not data:
+        raise RuntimeError(f"no IS data loaded for {universe_spec!r}")
+    bt = Backtest(
+        data=data,
+        strategy=module.STRATEGY,
+        initial_cash=config.DEFAULT_INITIAL_CASH,
+        allow_short=False,
+    )
+    return bt.run().equity_curve
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    parser.add_argument("strategy_id")
+    parser.add_argument(
+        "strategy_id", nargs="?",
+        help="Leaderboard strategy_id (use existing persisted equity curve). "
+             "Either this OR --strategy-path is required.",
+    )
+    parser.add_argument(
+        "--strategy-path", type=Path, default=None,
+        help="Path to a strategy module file. Runs a fresh IS backtest on the "
+             "candidate and decomposes its equity curve by year. Use for "
+             "not-yet-submitted candidates.",
+    )
     parser.add_argument(
         "--oos", action="store_true",
-        help="Use the OOS equity curve instead of IS.",
+        help="Use the OOS equity curve (strategy_id mode only).",
     )
     parser.add_argument(
         "--csv", type=Path, default=None,
@@ -122,14 +166,34 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    try:
-        path = _resolve_equity_path(args.strategy_id, oos=args.oos)
-    except FileNotFoundError as exc:
-        sys.stderr.write(f"[dump_annual_calmar] {exc}\n")
-        return 1
+    if not args.strategy_id and not args.strategy_path:
+        parser.error("either strategy_id or --strategy-path is required")
+    if args.strategy_id and args.strategy_path:
+        parser.error("pass either strategy_id or --strategy-path, not both")
+    if args.strategy_path and args.oos:
+        parser.error("--oos is only valid with strategy_id (path mode runs IS)")
 
-    eq_df = pd.read_csv(path, index_col=0, parse_dates=True)
-    eq = eq_df["equity"] if "equity" in eq_df.columns else eq_df.iloc[:, 0]
+    label: str
+    window: str
+    if args.strategy_path:
+        try:
+            eq = _run_backtest_for_path(args.strategy_path)
+        except Exception as exc:
+            sys.stderr.write(f"[dump_annual_calmar] backtest failed: {exc}\n")
+            return 1
+        label = args.strategy_path.name
+        window = "IS (fresh backtest)"
+    else:
+        try:
+            path = _resolve_equity_path(args.strategy_id, oos=args.oos)
+        except FileNotFoundError as exc:
+            sys.stderr.write(f"[dump_annual_calmar] {exc}\n")
+            return 1
+        eq_df = pd.read_csv(path, index_col=0, parse_dates=True)
+        eq = eq_df["equity"] if "equity" in eq_df.columns else eq_df.iloc[:, 0]
+        label = args.strategy_id
+        window = "OOS" if args.oos else "IS"
+
     metrics = annual_metrics(eq)
 
     if args.csv:
@@ -138,8 +202,7 @@ def main(argv: list[str] | None = None) -> int:
         sys.stderr.write(f"[dump_annual_calmar] wrote {args.csv}\n")
         return 0
 
-    window = "OOS" if args.oos else "IS"
-    print(_format_table(metrics, args.strategy_id, window))
+    print(_format_table(metrics, label, window))
     return 0
 
 

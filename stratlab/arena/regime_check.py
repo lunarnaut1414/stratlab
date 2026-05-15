@@ -7,29 +7,35 @@ Usage::
     python -m stratlab.arena.regime_check --signal "VIX<20"
     python -m stratlab.arena.regime_check --signal "TLT_21d > IEF_21d"
     python -m stratlab.arena.regime_check --signal "JNK > JNK_30d_MA"
+    python -m stratlab.arena.regime_check --signal "TYX - TNX > 0.5"
+    python -m stratlab.arena.regime_check --signal "VIX_pct252 < 0.3"
+    python -m stratlab.arena.regime_check --signal "JNK_20d > LQD_20d AND RSP_20d > SPY_20d"
 
 Default mode (no --signal) reports year-by-year benchmark return, top-2-year
-concentration, VIX-regime breakdown, and warnings. Used as a Step-0 pre-flight
-check before a round.
+concentration, VIX-regime breakdown, and warnings.
 
---signal mode evaluates a simple boolean expression over the chosen window
-and prints the percentage of trading days the expression is True, with a
-year-by-year breakdown. Used by generators to pre-validate signal frequency
-BEFORE designing a strategy around it — saves wasted submission attempts on
-gates that fire too rarely (or too often) in the IS bull window. Asked for
-across multiple rounds (gen_7/gen_8 wishlist, 7+ requests).
+--signal mode evaluates a boolean expression over the chosen window and
+prints the percentage of trading days the expression is True, with year-by-year
+breakdown. Used to pre-validate signal frequency BEFORE designing a strategy
+around it. Asked for across 4 rounds (10+ requests).
 
-Signal grammar (ATOM OP ATOM, no AND/OR yet):
-  ATOM := <TICKER>                   # close price at each bar (e.g. VIX, SPY)
-       | <TICKER>_<N>d              # N-day return (e.g. TLT_21d)
-       | <TICKER>_<N>d_MA           # N-day simple moving average of close
-       | <NUMBER>                    # numeric literal
-  OP   := < | > | <= | >= | == | !=
-  Special: ticker name may include ``^`` prefix (^VIX, ^TNX); use ``VIX``
-  as a convenience alias that resolves to ``^VIX``.
+Signal grammar:
 
-Mechanism: load required tickers from the cache for the chosen window; no
-network access — operates purely on cached bars.
+  EXPR    := COMPARISON [(AND|OR) COMPARISON]*    # composite via AND/OR (no parens)
+  COMPARISON := TERM CMP TERM                      # CMP: < > <= >= == !=
+  TERM    := ATOM | ATOM (+|-) ATOM                # arithmetic spread of two atoms
+  ATOM    := <TICKER>                              # close price at each bar
+           | <TICKER>_<N>d                         # N-day return (e.g. TLT_21d)
+           | <TICKER>_<N>d_MA                      # N-day simple moving average
+           | <TICKER>_pct<N>                       # close's percentile rank in N-day window
+           | <TICKER>_<M>d_pct<N>                  # M-day return's percentile rank in N-day window
+           | <NUMBER>                              # numeric literal
+
+  Special: ticker name may include ``^`` prefix (^VIX, ^TNX); bare ``VIX``
+  resolves to ``^VIX`` (same for VVIX/MOVE/SKEW/OVX/GVZ/TNX/IRX/FVX/TYX).
+  AND/OR are case-insensitive. Whitespace around operators is optional.
+
+Mechanism: load required tickers from cache; no network access.
 """
 from __future__ import annotations
 
@@ -160,13 +166,23 @@ def _format_report(fp: dict) -> str:
 
 # --- Signal expression evaluator ----------------------------------------
 
-# ATOM_RE matches either NUMBER or TICKER[_<N>d[_MA]].
-# TICKER allows alphanumerics, ^, ., =, /, - (covers ^VIX, ES=F, BRK-B).
+# Tickers contain alphanumerics + ^, =, /, but NO underscores (those are
+# transform separators). BRK-B/JPM-PA share-class hyphens are still allowed.
+# Note: bare hyphens here are ambiguous with subtraction in arithmetic terms;
+# the arithmetic splitter handles spaces/known suffixes to disambiguate.
 _NUMBER_RE = re.compile(r"^-?\d+(?:\.\d+)?$")
 _ATOM_RE = re.compile(
-    r"^(?P<ticker>[\^A-Za-z0-9.=/\-]+?)(?:_(?P<n>\d+)d(?:_(?P<kind>MA|RET))?)?$"
+    r"^(?P<ticker>[\^A-Za-z0-9.=/\-]+?)"
+    r"(?:_(?P<m>\d+)d(?:_(?P<kind>MA|RET))?)?"          # optional N-day return / MA
+    r"(?:_pct(?P<pct>\d+))?$"                            # optional percentile suffix
 )
 _COMPARISON_RE = re.compile(r"\s*(?P<op><=|>=|==|!=|<|>)\s*")
+# Top-level AND/OR splitter (no parentheses support). Word-boundary so we
+# don't match "AND" inside ticker names (NASDAQ has none, but defensive).
+_LOGIC_SPLIT_RE = re.compile(r"\s+(AND|OR)\s+", re.IGNORECASE)
+# Arithmetic infix detector — only splits on +/- when surrounded by whitespace,
+# so ticker hyphens like BRK-B don't get split.
+_ARITH_SPLIT_RE = re.compile(r"\s+([+\-])\s+")
 
 # Convenience aliases for common signal-only indices that agents write without
 # the ``^`` prefix. The cache stores them as ``^VIX``, etc.
@@ -192,7 +208,9 @@ def _resolve_ticker(t: str) -> str:
 def _parse_atom(atom: str) -> tuple[str, float | None, str | None, str | None]:
     """Parse one atom. Returns (kind, number, ticker, transform):
       - ("literal", value, None, None)         for a numeric literal
-      - ("series", None, ticker, transform)    where transform ∈ {None, "CLOSE", "RET_<N>", "MA_<N>"}
+      - ("series", None, ticker, transform)    where transform encodes the
+        compound: "CLOSE", "RET_<N>", "MA_<N>", "PCT_<N>",
+        "RET_<M>_PCT_<N>", "MA_<M>_PCT_<N>".
     """
     atom = atom.strip()
     if _NUMBER_RE.match(atom):
@@ -201,15 +219,36 @@ def _parse_atom(atom: str) -> tuple[str, float | None, str | None, str | None]:
     if not m:
         raise ValueError(f"cannot parse atom: {atom!r}")
     ticker = _resolve_ticker(m.group("ticker"))
-    n = m.group("n")
+    n_inner = m.group("m")
     kind = m.group("kind")
-    if n is None:
-        return ("series", None, ticker, "CLOSE")
-    n_int = int(n)
-    if kind == "MA":
-        return ("series", None, ticker, f"MA_{n_int}")
-    # default for "TICKER_<N>d" is N-day return (TLT_21d means 21-day return)
-    return ("series", None, ticker, f"RET_{n_int}")
+    pct_window = m.group("pct")
+
+    # Base transform (close, return, MA)
+    if n_inner is None:
+        base = "CLOSE"
+    else:
+        n_int = int(n_inner)
+        if kind == "MA":
+            base = f"MA_{n_int}"
+        else:
+            base = f"RET_{n_int}"
+
+    # Apply percentile wrapper if present
+    if pct_window is None:
+        return ("series", None, ticker, base)
+    pct_n = int(pct_window)
+    if base == "CLOSE":
+        return ("series", None, ticker, f"PCT_{pct_n}")
+    # e.g. "RET_21_PCT_252" or "MA_30_PCT_252"
+    return ("series", None, ticker, f"{base}_PCT_{pct_n}")
+
+
+def _rolling_pct_rank(s: pd.Series, window: int) -> pd.Series:
+    """Per-bar percentile rank of s within its trailing ``window`` values.
+    Value in [0, 1]: 0 = bottom of distribution, 1 = top. NaN until window
+    is satisfied. Implemented via rolling.rank(pct=True).
+    """
+    return s.rolling(window, min_periods=window).rank(pct=True)
 
 
 def _series_for_atom(
@@ -225,15 +264,50 @@ def _series_for_atom(
     if ticker not in cache:
         cache[ticker] = _load_close_series(ticker, start, end)
     close = cache[ticker]
-    if transform == "CLOSE":
-        return close
-    if transform.startswith("RET_"):
-        n = int(transform.split("_", 1)[1])
-        return close.pct_change(n)
-    if transform.startswith("MA_"):
-        n = int(transform.split("_", 1)[1])
-        return close.rolling(n, min_periods=n).mean()
-    raise ValueError(f"unknown transform: {transform!r}")
+    # Decompose transform into optional base + optional percentile wrapper.
+    parts = transform.split("_PCT_") if "_PCT_" in transform else None
+    if parts:
+        base, pct_str = parts[0], parts[1]
+        pct_n = int(pct_str)
+    elif transform.startswith("PCT_"):
+        base, pct_n = "CLOSE", int(transform.split("_", 1)[1])
+    else:
+        base, pct_n = transform, None
+
+    if base == "CLOSE":
+        underlying = close
+    elif base.startswith("RET_"):
+        n = int(base.split("_", 1)[1])
+        underlying = close.pct_change(n)
+    elif base.startswith("MA_"):
+        n = int(base.split("_", 1)[1])
+        underlying = close.rolling(n, min_periods=n).mean()
+    else:
+        raise ValueError(f"unknown base transform: {base!r}")
+
+    if pct_n is None:
+        return underlying
+    return _rolling_pct_rank(underlying, pct_n)
+
+
+def _parse_term(term_str: str, start: str, end: str, cache: dict) -> pd.Series | float:
+    """Parse a TERM = ATOM | ATOM (+|-) ATOM. Returns the computed value/series."""
+    term_str = term_str.strip()
+    # Detect arithmetic with whitespace-padded +/- (so BRK-B isn't split)
+    m = _ARITH_SPLIT_RE.search(term_str)
+    if not m:
+        atom = _parse_atom(term_str)
+        return _series_for_atom(atom, start, end, cache)
+    op = m.group(1)
+    lhs_str = term_str[: m.start()].strip()
+    rhs_str = term_str[m.end():].strip()
+    lhs_atom = _parse_atom(lhs_str)
+    rhs_atom = _parse_atom(rhs_str)
+    lhs_val = _series_for_atom(lhs_atom, start, end, cache)
+    rhs_val = _series_for_atom(rhs_atom, start, end, cache)
+    if op == "+":
+        return lhs_val + rhs_val
+    return lhs_val - rhs_val
 
 
 def _compare(lhs, rhs, op: str) -> pd.Series:
@@ -254,47 +328,35 @@ def _compare(lhs, rhs, op: str) -> pd.Series:
     raise ValueError(f"unknown op: {op!r}")
 
 
-def evaluate_signal(expression: str, window: str = "is") -> dict:
-    """Evaluate a single-comparison boolean expression over the window and
-    return {percent_true, by_year, n_total, n_valid, expression, start, end}.
-    """
-    m = _COMPARISON_RE.search(expression)
+def _evaluate_comparison(
+    comp_str: str,
+    start: str,
+    end: str,
+    cache: dict,
+) -> pd.Series:
+    """Evaluate a single COMPARISON (TERM CMP TERM) and return a boolean Series."""
+    m = _COMPARISON_RE.search(comp_str)
     if not m:
         raise ValueError(
-            f"expression must contain one of < > <= >= == != ; got {expression!r}"
+            f"sub-expression missing comparison operator: {comp_str!r}"
         )
     op = m.group("op")
-    lhs_str = expression[: m.start()].strip()
-    rhs_str = expression[m.end():].strip()
+    lhs_str = comp_str[: m.start()].strip()
+    rhs_str = comp_str[m.end():].strip()
     if not lhs_str or not rhs_str:
-        raise ValueError(f"expression must be ATOM OP ATOM; got {expression!r}")
+        raise ValueError(f"comparison must be TERM OP TERM; got {comp_str!r}")
+    lhs_val = _parse_term(lhs_str, start, end, cache)
+    rhs_val = _parse_term(rhs_str, start, end, cache)
 
-    lhs_atom = _parse_atom(lhs_str)
-    rhs_atom = _parse_atom(rhs_str)
-
-    if window == "is":
-        start, end = config.is_window_str()
-    elif window == "oos":
-        start, end = config.oos_window_str()
-    else:
-        raise ValueError(f"window must be 'is' or 'oos', got {window!r}")
-
-    cache: dict[str, pd.Series] = {}
-    lhs_val = _series_for_atom(lhs_atom, start, end, cache)
-    rhs_val = _series_for_atom(rhs_atom, start, end, cache)
-
-    # Align indexes if both are Series; ffill is appropriate because index
-    # levels and prices are persistent state, not events.
+    # Align indexes if both are Series; ffill since prices are persistent state.
     if isinstance(lhs_val, pd.Series) and isinstance(rhs_val, pd.Series):
         idx = lhs_val.index.union(rhs_val.index).sort_values()
         lhs_val = lhs_val.reindex(idx).ffill()
         rhs_val = rhs_val.reindex(idx).ffill()
-    elif isinstance(lhs_val, pd.Series):
-        idx = lhs_val.index
-    elif isinstance(rhs_val, pd.Series):
-        idx = rhs_val.index
-    else:
-        raise ValueError("both sides are literals — there's nothing to evaluate over time")
+    elif not isinstance(lhs_val, pd.Series) and not isinstance(rhs_val, pd.Series):
+        raise ValueError(
+            f"both sides of comparison are literals: {comp_str!r}"
+        )
 
     # Restrict to window
     start_ts = pd.Timestamp(start)
@@ -304,10 +366,46 @@ def evaluate_signal(expression: str, window: str = "is") -> dict:
     if isinstance(rhs_val, pd.Series):
         rhs_val = rhs_val.loc[(rhs_val.index >= start_ts) & (rhs_val.index <= end_ts)]
 
-    truth = _compare(lhs_val, rhs_val, op)
-    if isinstance(truth, bool):
-        # both literals — already validated above, but defensive
-        raise ValueError("expression produced a constant truth value")
+    return _compare(lhs_val, rhs_val, op)
+
+
+def evaluate_signal(expression: str, window: str = "is") -> dict:
+    """Evaluate a (possibly AND/OR composite) boolean expression over the
+    window. Returns {percent_true, by_year, n_total, expression, start, end}.
+    """
+    if window == "is":
+        start, end = config.is_window_str()
+    elif window == "oos":
+        start, end = config.oos_window_str()
+    else:
+        raise ValueError(f"window must be 'is' or 'oos', got {window!r}")
+
+    cache: dict[str, pd.Series] = {}
+
+    # Split top-level expression by AND/OR. Left-associative evaluation.
+    parts = _LOGIC_SPLIT_RE.split(expression.strip())
+    # parts is [comp, op, comp, op, ...] with op uppercase
+    truth: pd.Series | None = None
+    for i, segment in enumerate(parts):
+        seg = segment.strip()
+        if i == 0:
+            truth = _evaluate_comparison(seg, start, end, cache)
+            continue
+        # Odd indices are AND/OR; even (>=2) are comparisons.
+        if i % 2 == 1:
+            logic_op = seg.upper()
+            continue
+        rhs_truth = _evaluate_comparison(seg, start, end, cache)
+        # Align indexes (both series of booleans by here).
+        idx = truth.index.union(rhs_truth.index).sort_values()
+        lhs = truth.reindex(idx)
+        rhs = rhs_truth.reindex(idx)
+        if logic_op == "AND":
+            truth = lhs & rhs
+        elif logic_op == "OR":
+            truth = lhs | rhs
+        else:
+            raise ValueError(f"unknown logic op: {logic_op!r}")
 
     # Drop NaN rows (where lookback wasn't yet satisfied) before counting.
     truth = truth.dropna()

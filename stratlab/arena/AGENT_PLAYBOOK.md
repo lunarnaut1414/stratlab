@@ -45,27 +45,49 @@ dead_ends. Use them aggressively to iterate on candidates before committing
 an intent:
 
 - **`python -m stratlab.arena.regime_check --signal "<expr>"`** — pre-validate
-  how often a gate fires in IS. Saves wasted submissions on too-restrictive
-  gates. Examples: `"VIX<20"`, `"TLT_21d > IEF_21d"`, `"JNK > JNK_30d_MA"`.
+  how often a gate fires in IS, year-by-year. Grammar supports:
+    - simple compares: `"VIX<20"`, `"TLT_21d > IEF_21d"`, `"JNK > JNK_30d_MA"`
+    - arithmetic spreads: `"TYX - TNX > 0.5"`, `"JNK_20d - LQD_20d > 0"`
+    - percentile rank: `"VIX_pct252 < 0.3"`, `"MOVE_pct252 > 0.7"`
+    - AND/OR composites: `"JNK_20d > LQD_20d AND RSP_20d > SPY_20d"`
 - **`python -m stratlab.arena.is_calmar_estimate <strategy_path>`** — run a
   sub-window backtest (2010-2014 by default) to estimate IS Calmar before
-  committing. ~2x faster than full IS. Use to filter candidates likely to
-  miss the 0.5 floor before paying full backtest cost.
+  committing. Add `--late-is` to bracket with the 2014-2018 sub-window — most
+  multi-asset / ETF strategies look STRONG in early-IS (QE rally) and WEAK
+  in late-IS (dollar-bull / EM-bear). Running both gives an honest range.
 - **`python -m stratlab.arena.corr_check <strategy_path>`** — run the full
-  IS backtest but compute ONLY max-corr-to-top-5 + loss-mode-corr.
-  Doesn't write the leaderboard, doesn't consume an intent. Use to iterate
-  signal mix until corr falls under 0.85 without burning intent slots.
+  IS backtest but compute max-corr-to-top-K + loss-mode-corr WITHOUT writing
+  to the leaderboard or consuming an intent. Default output shows top-3
+  blockers with their generations, Calmar floor check, and pass/fail.
+  Flags: `--top-k N` (default 5), `--exclude-gen N` (e.g. exclude current
+  generation when concurrent submissions are destabilizing top-5).
 - **`python -m stratlab.arena.corr_dump --top 12`** — pairwise IS-return
   Pearson matrix over the top-12 leaderboard rows. Use this for ensemble
   construction (opus-3 role) to pick components with all pairs <0.3.
 - **`python -m stratlab.arena.dump_annual_calmar <strategy_id>`** — per-year
-  return + Calmar from a strategy's persisted equity curve. Use to diagnose
-  which years carry/break a strategy when h1/h2 columns don't tell the
-  whole story.
+  return + Calmar from a strategy's persisted equity curve. Or pass
+  `--strategy-path <path>` to run a fresh IS backtest on a not-yet-submitted
+  candidate and decompose by year — useful for spotting hidden negative
+  years / h1/h2 fragility before committing.
 - **`python -m stratlab.data.inception --tickers MTUM QUAL VIG --covers-is`** —
-  multi-ticker cache-coverage check. Many factor ETFs (MTUM, QUAL launched
-  2013; SCHD 2011) do NOT cover IS_START (2010). Run this BEFORE designing
-  a strategy around those tickers to avoid silent fallbacks.
+  multi-ticker cache-coverage check. See `ETF_REGISTRY.md` for a curated
+  list of common ETFs grouped by IS coverage — factor ETFs (MTUM, QUAL,
+  SCHD, NOBL, XLRE, XLC) do NOT cover full IS and bias backtests upward.
+
+### Reusable signal-construction helpers (don't reimplement inline)
+
+When your strategy needs these, import from `stratlab.analytics.quality`
+rather than coding inline — multiple agents have reimplemented these from
+scratch and the centralized versions are vectorized:
+
+- **`rolling_max_drawdown(close, window)`** — per-bar trailing-window max-DD
+  of a price series (returns <= 0).
+- **`quality_filter_maxdd(close, window, threshold)`** — boolean mask: True
+  where trailing-window max-DD is shallower than `threshold` (negative).
+  Accepts Series or DataFrame for cross-sectional screening.
+- **`cross_sectional_dispersion(returns, method=...)`** — standard deviation
+  (or IQR / MAD) of returns ACROSS the universe at each bar. Use as a
+  "stock-picking vs mega-cap-led" regime signal.
 
 ### Banned anti-patterns (will block on permission prompts)
 

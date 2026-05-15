@@ -3,21 +3,27 @@
 Usage::
 
     python -m stratlab.arena.is_calmar_estimate <strategy_module_path>
+    python -m stratlab.arena.is_calmar_estimate <path> --late-is
     python -m stratlab.arena.is_calmar_estimate <path> --start 2010-01-01 --end 2014-12-31
 
-Runs the same backtest pipeline as submit.py but over a shortened IS sub-window
-(default: first half, 2010-01-01 to 2014-12-31). Prints estimated IS Calmar,
-Sharpe, n_trades, max_dd; DOES NOT write to leaderboard / returns matrix /
-tearsheets / dead_ends / intent registry. Use this for fast iteration on
-threshold/asset choices BEFORE committing to a full submit.
+Runs the same backtest pipeline as submit.py but over a shortened IS sub-window.
+DOES NOT write to leaderboard / returns matrix / tearsheets / dead_ends /
+intent registry.
 
-Roughly 2x faster than a full IS run (half the bars to simulate). Estimated
-Calmar over a sub-window is an APPROXIMATION of full IS Calmar — strategies
-with strong sub-period asymmetry (h1 vs h2 split) will be misestimated. Use
-this for "is it in the right ballpark" not "will it pass the 0.5 gate".
+Sub-window presets:
+  - default (--early-is, 2010-2014): captures QE-rally regime, broad asset-class
+    participation. Tends to OVERESTIMATE multi-asset / ETF-rotation Calmar.
+  - --late-is (2014-2018): dollar-bull / EM-bear / rate-rising regime. Tends
+    to UNDERESTIMATE the same strategies. Run both for a 2-point bracket.
 
-Asked for in gen_8 by sonnet-4 and opus-2 (the "pre-submission Calmar
-estimate" wishlist item).
+Estimated Calmar over a sub-window is an APPROXIMATION of full IS Calmar —
+strategies with strong sub-period asymmetry (h1 vs h2 split) will be
+misestimated. Use this for "is it in the right ballpark" not "will it pass
+the 0.5 gate". For strategies that look borderline in BOTH sub-windows,
+proceed to a full corr_check / submit.
+
+Asked for in gen_8 (sonnet-4, opus-2) and gen_9/gen_10 (sonnet-3, sonnet-5,
+sonnet-7 — 4 requests for alt-window option).
 """
 from __future__ import annotations
 
@@ -36,8 +42,14 @@ from stratlab.engine.backtest import Backtest
 
 # Default sub-sample: first half of IS. Roughly half the bars to simulate,
 # while preserving enough history for typical 200d/252d lookbacks to warm up.
-_DEFAULT_START = "2010-01-01"
-_DEFAULT_END = "2014-12-31"
+_EARLY_IS_START = "2010-01-01"
+_EARLY_IS_END = "2014-12-31"
+# Late half of IS — dollar-bull / EM-bear / rate-rising regime. Use this as
+# the conservative bracket for strategies that look strong in the early half.
+_LATE_IS_START = "2014-01-01"
+_LATE_IS_END = "2018-12-31"
+_DEFAULT_START = _EARLY_IS_START
+_DEFAULT_END = _EARLY_IS_END
 
 
 def estimate(
@@ -92,17 +104,39 @@ def main(argv: list[str] | None = None) -> int:
         help="Path to the strategy module (must export STRATEGY, NAME, HYPOTHESIS).",
     )
     parser.add_argument(
-        "--start", default=_DEFAULT_START,
-        help=f"Sub-window start (YYYY-MM-DD). Default {_DEFAULT_START}.",
+        "--start", default=None,
+        help=f"Sub-window start (YYYY-MM-DD). Default {_DEFAULT_START}. "
+             f"Ignored if --late-is or --early-is is given.",
     )
     parser.add_argument(
-        "--end", default=_DEFAULT_END,
-        help=f"Sub-window end (YYYY-MM-DD). Default {_DEFAULT_END}.",
+        "--end", default=None,
+        help=f"Sub-window end (YYYY-MM-DD). Default {_DEFAULT_END}. "
+             f"Ignored if --late-is or --early-is is given.",
+    )
+    preset = parser.add_mutually_exclusive_group()
+    preset.add_argument(
+        "--late-is", action="store_true",
+        help=f"Use the late-IS preset window ({_LATE_IS_START}..{_LATE_IS_END}). "
+             f"Dollar-bull / EM-bear / rate-rising regime — conservative bracket "
+             f"for multi-asset/ETF strategies that look strong in early-IS.",
+    )
+    preset.add_argument(
+        "--early-is", action="store_true",
+        help=f"Use the early-IS preset window ({_EARLY_IS_START}..{_EARLY_IS_END}). "
+             f"Same as the default.",
     )
     args = parser.parse_args(argv)
 
+    if args.late_is:
+        start, end = _LATE_IS_START, _LATE_IS_END
+    elif args.early_is:
+        start, end = _EARLY_IS_START, _EARLY_IS_END
+    else:
+        start = args.start or _DEFAULT_START
+        end = args.end or _DEFAULT_END
+
     try:
-        m = estimate(args.strategy_path, start=args.start, end=args.end)
+        m = estimate(args.strategy_path, start=start, end=end)
     except Exception as exc:
         sys.stderr.write(f"[is_calmar_estimate] ERROR: {exc}\n")
         traceback.print_exc()
